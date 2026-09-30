@@ -1,0 +1,1517 @@
+program mediadirs;
+
+{ Create EleBBS 0.11b1 file areas (FILES.RA + FILES.ELE, FILES.RDX rebuilt)
+  for every directory under START_DIR that directly holds video files.
+  Record layouts follow FILESrecord and EleFilesRecord in struct.250 of the
+  EleBBS 0.11b1 source (github.com/mbek/elebbs, commit 0d026e2). }
+
+{$mode objfpc}{$H+}
+{$APPTYPE CONSOLE}
+
+uses
+  Windows, SysUtils;
+
+const
+  AppVersion = '0.1.0';
+
+  NameLen = 40;
+  FilePathLen = 40;
+  PasswordLen = 15;
+  ExportUrlLen = 250;
+  FtpPathLen = 250;
+  FtpLoginLen = 35;
+  FtpPasswordLen = 35;
+  MaxAreaNum = 65535;
+
+  ConfigSysPathOffset = 1056;
+  ConfigSysPathLen = 60;
+
+  DefaultCodePage = 437;
+  DefaultSystemDir = 'c:\ele';
+
+  Kernel32Dll = 'kernel32.dll';
+  MdInvalidAttr = DWORD($FFFFFFFF);
+  MdAttrDirectory = $10;
+  MdAttrReparse = $400;
+  MdGenericRead = DWORD($80000000);
+  MdGenericWrite = DWORD($40000000);
+  MdShareRead = 1;
+  MdShareWrite = 2;
+  MdCreateAlways = 2;
+  MdOpenExisting = 3;
+  MdFileAttrNormal = $80;
+  MdMoveReplace = 1;
+  MdMoveWriteThrough = 8;
+  MdStdOutput = DWORD($FFFFFFF5);
+  MdStdError = DWORD($FFFFFFF4);
+  MdNoBestFit = $400;
+  MdBackupSemantics = $02000000;
+  MdShareDelete = 4;
+  MdSymlinkDirectory = 1;
+  MdSymlinkUnprivileged = 2;
+  MdErrorPrivilegeNotHeld = 1314;
+  MdErrorInvalidParameter = 87;
+  LinkNameWidth = 6;
+
+type
+  TFlagType = array[1..4] of Byte;
+
+  TFilesRecord = packed record
+    AreaNum: Word;
+    Unused: Word;
+    Name: String[40];
+    Attrib: Byte;
+    FilePath: String[40];
+    KillDaysDL: Word;
+    KillDaysFD: Word;
+    PassWord: String[15];
+    MoveArea: Word;
+    Age: Byte;
+    ConvertExt: Byte;
+    Group: Word;
+    Attrib2: Byte;
+    DefCost: Word;
+    UploadArea: Word;
+    UploadSecurity: Word;
+    UploadFlags: TFlagType;
+    UploadNotFlags: TFlagType;
+    Security: Word;
+    Flags: TFlagType;
+    NotFlags: TFlagType;
+    ListSecurity: Word;
+    ListFlags: TFlagType;
+    ListNotFlags: TFlagType;
+    AltGroup: array[1..3] of Word;
+    Device: Byte;
+    FreeSpace: array[1..13] of Byte;
+  end;
+
+  TEleFilesRecord = packed record
+    AreaNum: LongInt;
+    ExportURL: String[250];
+    ftpPath: String[250];
+    ftpLoginName: String[35];
+    ftpPassword: String[35];
+    Attribute: Byte;
+    FreeSpace: array[1..140] of LongInt;
+  end;
+
+  EMd = class(Exception)
+  public
+    WMsg: UnicodeString;
+    constructor CreateW(const AMsg: UnicodeString);
+  end;
+
+  TUStrArray = array of UnicodeString;
+
+  TAreaFiles = record
+    FilesRa, FilesEle, FilesRdx: UnicodeString;
+    RaData, EleData: TBytes;
+    Ra: array of TFilesRecord;
+    Ele: array of TEleFilesRecord;
+    Warnings: TUStrArray;
+  end;
+
+  TPlanned = record
+    Index: Integer;
+    Ra: TFilesRecord;
+    Ele: TEleFilesRecord;
+    SourceDir: UnicodeString;
+    TruncatedName: Boolean;
+    LinkPath: UnicodeString;
+    LinkExists: Boolean;
+  end;
+
+  TSkipped = record
+    SourceDir, Reason: UnicodeString;
+  end;
+
+  TPlan = record
+    New: array of TPlanned;
+    Skipped: array of TSkipped;
+  end;
+
+  TExisting = record
+    Keys, Descs: TUStrArray;
+  end;
+
+function MdGetFileAttributesW(p: PWideChar): DWORD; stdcall; external Kernel32Dll name 'GetFileAttributesW';
+function MdCreateFileW(p: PWideChar; access, share: DWORD; sec: Pointer; disposition, flags: DWORD; template: THandle): THandle; stdcall; external Kernel32Dll name 'CreateFileW';
+function MdReadFile(h: THandle; buf: Pointer; n: DWORD; done: PDWORD; ov: Pointer): BOOL; stdcall; external Kernel32Dll name 'ReadFile';
+function MdWriteFile(h: THandle; buf: Pointer; n: DWORD; done: PDWORD; ov: Pointer): BOOL; stdcall; external Kernel32Dll name 'WriteFile';
+function MdGetFileSize(h: THandle; high: PDWORD): DWORD; stdcall; external Kernel32Dll name 'GetFileSize';
+function MdFlushFileBuffers(h: THandle): BOOL; stdcall; external Kernel32Dll name 'FlushFileBuffers';
+function MdCloseHandle(h: THandle): BOOL; stdcall; external Kernel32Dll name 'CloseHandle';
+function MdDeleteFileW(p: PWideChar): BOOL; stdcall; external Kernel32Dll name 'DeleteFileW';
+function MdMoveFileExW(src, dst: PWideChar; flags: DWORD): BOOL; stdcall; external Kernel32Dll name 'MoveFileExW';
+function MdCopyFileW(src, dst: PWideChar; failIfExists: BOOL): BOOL; stdcall; external Kernel32Dll name 'CopyFileW';
+function MdFindFirstFileW(p: PWideChar; data: Pointer): THandle; stdcall; external Kernel32Dll name 'FindFirstFileW';
+function MdFindNextFileW(h: THandle; data: Pointer): BOOL; stdcall; external Kernel32Dll name 'FindNextFileW';
+function MdFindClose(h: THandle): BOOL; stdcall; external Kernel32Dll name 'FindClose';
+function MdGetFullPathNameW(p: PWideChar; n: DWORD; buf: PWideChar; filePart: Pointer): DWORD; stdcall; external Kernel32Dll name 'GetFullPathNameW';
+function MdGetLongPathNameW(p: PWideChar; buf: PWideChar; n: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetLongPathNameW';
+function MdGetShortPathNameW(p: PWideChar; buf: PWideChar; n: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetShortPathNameW';
+function MdGetCurrentDirectoryW(n: DWORD; buf: PWideChar): DWORD; stdcall; external Kernel32Dll name 'GetCurrentDirectoryW';
+function MdGetEnvironmentVariableW(name, buf: PWideChar; n: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetEnvironmentVariableW';
+function MdGetCommandLineW: PWideChar; stdcall; external Kernel32Dll name 'GetCommandLineW';
+function MdLocalFree(h: Pointer): Pointer; stdcall; external Kernel32Dll name 'LocalFree';
+function MdGetStdHandle(n: DWORD): THandle; stdcall; external Kernel32Dll name 'GetStdHandle';
+function MdGetConsoleMode(h: THandle; mode: PDWORD): BOOL; stdcall; external Kernel32Dll name 'GetConsoleMode';
+function MdWriteConsoleW(h: THandle; buf: Pointer; n: DWORD; done: PDWORD; reserved: Pointer): BOOL; stdcall; external Kernel32Dll name 'WriteConsoleW';
+function MdGetLastError: DWORD; stdcall; external Kernel32Dll name 'GetLastError';
+function MdIsValidCodePage(cp: UINT): BOOL; stdcall; external Kernel32Dll name 'IsValidCodePage';
+function MdWideCharToMultiByte(cp: UINT; flags: DWORD; src: PWideChar; srcLen: Integer; dst: PAnsiChar; dstLen: Integer; defChar: PAnsiChar; usedDef: Pointer): Integer; stdcall; external Kernel32Dll name 'WideCharToMultiByte';
+function MdMultiByteToWideChar(cp: UINT; flags: DWORD; src: PAnsiChar; srcLen: Integer; dst: PWideChar; dstLen: Integer): Integer; stdcall; external Kernel32Dll name 'MultiByteToWideChar';
+function MdCharLowerBuffW(p: PWideChar; n: DWORD): DWORD; stdcall; external 'user32.dll' name 'CharLowerBuffW';
+function MdCharUpperBuffW(p: PWideChar; n: DWORD): DWORD; stdcall; external 'user32.dll' name 'CharUpperBuffW';
+function MdCreateSymbolicLinkW(link, target: PWideChar; flags: DWORD): ByteBool; stdcall; external Kernel32Dll name 'CreateSymbolicLinkW';
+function MdGetFinalPathNameByHandleW(h: THandle; buf: PWideChar; n, flags: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetFinalPathNameByHandleW';
+function MdCreateDirectoryW(p: PWideChar; sec: Pointer): BOOL; stdcall; external Kernel32Dll name 'CreateDirectoryW';
+function MdRemoveDirectoryW(p: PWideChar): BOOL; stdcall; external Kernel32Dll name 'RemoveDirectoryW';
+function MdCommandLineToArgvW(cmd: PWideChar; numArgs: PLongInt): PPWideChar; stdcall; external 'shell32.dll' name 'CommandLineToArgvW';
+
+var
+  CodePage: UINT = DefaultCodePage;
+
+constructor EMd.CreateW(const AMsg: UnicodeString);
+begin
+  inherited Create(String(AMsg));
+  WMsg := AMsg;
+end;
+
+{ ---- console output ---- }
+
+procedure WriteTo(std: DWORD; const s: UnicodeString);
+var
+  h: THandle;
+  mode, done: DWORD;
+  line: UnicodeString;
+  u: UTF8String;
+begin
+  h := MdGetStdHandle(std);
+  line := s + #13#10;
+  if MdGetConsoleMode(h, @mode) then
+    MdWriteConsoleW(h, PWideChar(line), Length(line), @done, nil)
+  else
+  begin
+    u := UTF8Encode(line);
+    if Length(u) > 0 then
+      MdWriteFile(h, @u[1], Length(u), @done, nil);
+  end;
+end;
+
+procedure Say(const s: UnicodeString);
+begin
+  WriteTo(MdStdOutput, s);
+end;
+
+procedure Complain(const s: UnicodeString);
+begin
+  WriteTo(MdStdError, s);
+end;
+
+{ ---- string helpers ---- }
+
+procedure AddStr(var a: TUStrArray; const s: UnicodeString);
+begin
+  SetLength(a, Length(a) + 1);
+  a[High(a)] := s;
+end;
+
+function LowerW(const s: UnicodeString): UnicodeString;
+begin
+  Result := s;
+  UniqueString(Result);
+  if Length(Result) > 0 then
+    MdCharLowerBuffW(PWideChar(Result), Length(Result));
+end;
+
+function UpperW(const s: UnicodeString): UnicodeString;
+begin
+  Result := s;
+  UniqueString(Result);
+  if Length(Result) > 0 then
+    MdCharUpperBuffW(PWideChar(Result), Length(Result));
+end;
+
+function TrimW(const s: UnicodeString): UnicodeString;
+var
+  a, b: Integer;
+begin
+  a := 1;
+  b := Length(s);
+  while (a <= b) and (s[a] <= ' ') do Inc(a);
+  while (b >= a) and (s[b] <= ' ') do Dec(b);
+  Result := Copy(s, a, b - a + 1);
+end;
+
+function PadRight(const s: UnicodeString; width: Integer): UnicodeString;
+begin
+  Result := s;
+  while Length(Result) < width do Result := Result + ' ';
+end;
+
+function PadLeft(const s: UnicodeString; width: Integer): UnicodeString;
+begin
+  Result := s;
+  while Length(Result) < width do Result := ' ' + Result;
+end;
+
+function IsSep(c: WideChar): Boolean;
+begin
+  Result := (c = '\') or (c = '/');
+end;
+
+function StripTrailingSeps(const s: UnicodeString): UnicodeString;
+begin
+  Result := s;
+  while (Length(Result) > 0) and IsSep(Result[Length(Result)]) do
+    SetLength(Result, Length(Result) - 1);
+end;
+
+function IsDriveRoot(const s: UnicodeString): Boolean;
+begin
+  Result := (Length(s) = 3) and (s[2] = ':') and IsSep(s[3]);
+end;
+
+function JoinPath(const dir, name: UnicodeString): UnicodeString;
+begin
+  if (dir <> '') and IsSep(dir[Length(dir)]) then
+    Result := dir + name
+  else
+    Result := dir + '\' + name;
+end;
+
+function LastSepPos(const s: UnicodeString): Integer;
+begin
+  Result := Length(s);
+  while (Result > 0) and not IsSep(s[Result]) do Dec(Result);
+end;
+
+function FileNameOf(const p: UnicodeString): UnicodeString;
+begin
+  Result := Copy(p, LastSepPos(p) + 1, MaxInt);
+end;
+
+function DirOf(const p: UnicodeString): UnicodeString;
+begin
+  Result := Copy(p, 1, LastSepPos(p));
+end;
+
+function ErrText(code: DWORD): UnicodeString;
+begin
+  Result := TrimW(UnicodeString(SysErrorMessage(code)));
+end;
+
+{ ---- code page conversion ---- }
+
+function EncodeCP(const s: UnicodeString): TBytes;
+var
+  n: Integer;
+  flags: DWORD;
+  def: AnsiChar;
+  pdef: PAnsiChar;
+begin
+  SetLength(Result, 0);
+  if s = '' then Exit;
+  if (CodePage = 65001) or (CodePage >= 50000) then
+  begin
+    flags := 0;
+    pdef := nil;
+  end
+  else
+  begin
+    flags := MdNoBestFit;
+    def := '?';
+    pdef := @def;
+  end;
+  n := MdWideCharToMultiByte(CodePage, flags, PWideChar(s), Length(s), nil, 0, pdef, nil);
+  if n <= 0 then Exit;
+  SetLength(Result, n);
+  MdWideCharToMultiByte(CodePage, flags, PWideChar(s), Length(s), PAnsiChar(@Result[0]), n, pdef, nil);
+end;
+
+function DecodeCP(p: PByte; len: Integer): UnicodeString;
+var
+  n: Integer;
+begin
+  Result := '';
+  if len <= 0 then Exit;
+  n := MdMultiByteToWideChar(CodePage, 0, PAnsiChar(p), len, nil, 0);
+  if n <= 0 then Exit;
+  SetLength(Result, n);
+  MdMultiByteToWideChar(CodePage, 0, PAnsiChar(p), len, PWideChar(Result), n);
+end;
+
+function Representable(const s: UnicodeString): Boolean;
+var
+  b: TBytes;
+begin
+  b := EncodeCP(s);
+  if Length(b) = 0 then
+    Exit(s = '');
+  Result := DecodeCP(@b[0], Length(b)) = s;
+end;
+
+{ Pascal String[N]: one length byte, then N zero-padded character bytes. }
+
+function GetPStr(const field; maxLen: Integer): UnicodeString;
+var
+  p: PByte;
+  n: Integer;
+begin
+  p := @field;
+  n := p^;
+  if n > maxLen then n := maxLen;
+  Result := DecodeCP(p + 1, n);
+end;
+
+procedure SetPStr(var field; maxLen: Integer; const value: UnicodeString);
+var
+  p: PByte;
+  b: TBytes;
+  n: Integer;
+begin
+  p := @field;
+  b := EncodeCP(value);
+  n := Length(b);
+  if n > maxLen then n := maxLen;
+  FillChar(field, maxLen + 1, 0);
+  p^ := n;
+  if n > 0 then
+    Move(b[0], (p + 1)^, n);
+end;
+
+procedure NormalizePStr(var field; maxLen: Integer);
+var
+  p: PByte;
+begin
+  p := @field;
+  if p^ > maxLen then p^ := maxLen;
+  if p^ < maxLen then
+    FillChar((p + 1 + p^)^, maxLen - p^, 0);
+end;
+
+{ ---- file system ---- }
+
+function Attrs(const p: UnicodeString): DWORD;
+begin
+  Result := MdGetFileAttributesW(PWideChar(p));
+end;
+
+function IsDir(const p: UnicodeString): Boolean;
+var
+  a: DWORD;
+begin
+  a := Attrs(p);
+  Result := (a <> MdInvalidAttr) and ((a and MdAttrDirectory) <> 0);
+end;
+
+function IsFile(const p: UnicodeString): Boolean;
+var
+  a: DWORD;
+begin
+  a := Attrs(p);
+  Result := (a <> MdInvalidAttr) and ((a and MdAttrDirectory) = 0);
+end;
+
+{ Returns dir\name with the on-disk spelling of name, or '' if no such file. }
+function FindFileCI(const dir, name: UnicodeString): UnicodeString;
+var
+  h: THandle;
+  fd: TWin32FindDataW;
+begin
+  Result := '';
+  h := MdFindFirstFileW(PWideChar(JoinPath(dir, name)), @fd);
+  if h = THandle(-1) then Exit;
+  if (fd.dwFileAttributes and MdAttrDirectory) = 0 then
+    Result := JoinPath(dir, UnicodeString(PWideChar(@fd.cFileName[0])));
+  MdFindClose(h);
+end;
+
+function CallPathApi(kind: Integer; const p: UnicodeString): UnicodeString;
+var
+  buf: array[0..32767] of WideChar;
+  n: DWORD;
+begin
+  case kind of
+    0: n := MdGetFullPathNameW(PWideChar(p), Length(buf), @buf[0], nil);
+    1: n := MdGetLongPathNameW(PWideChar(p), @buf[0], Length(buf));
+  else
+    n := MdGetShortPathNameW(PWideChar(p), @buf[0], Length(buf));
+  end;
+  if (n > 0) and (n < Length(buf)) then
+    Result := UnicodeString(PWideChar(@buf[0]))
+  else
+    Result := '';
+end;
+
+function FullPath(const p: UnicodeString): UnicodeString;
+begin
+  Result := CallPathApi(0, p);
+  if Result = '' then Result := p;
+end;
+
+function CurrentDir: UnicodeString;
+var
+  buf: array[0..32767] of WideChar;
+begin
+  if MdGetCurrentDirectoryW(Length(buf), @buf[0]) > 0 then
+    Result := UnicodeString(PWideChar(@buf[0]))
+  else
+    Result := '.';
+end;
+
+{ Where a path really leads once symlinks are followed, as a plain C:\... or
+  \\server\share\... path; '' if it can't be opened. }
+function FinalPath(const p: UnicodeString): UnicodeString;
+var
+  h: THandle;
+  buf: array[0..32767] of WideChar;
+  n: DWORD;
+begin
+  Result := '';
+  h := MdCreateFileW(PWideChar(p), 0, MdShareRead or MdShareWrite or MdShareDelete, nil,
+    MdOpenExisting, MdBackupSemantics, 0);
+  if h = THandle(-1) then Exit;
+  n := MdGetFinalPathNameByHandleW(h, @buf[0], Length(buf), 0);
+  MdCloseHandle(h);
+  if (n = 0) or (n >= DWORD(Length(buf))) then Exit;
+  Result := UnicodeString(PWideChar(@buf[0]));
+  if Copy(Result, 1, 8) = '\\?\UNC\' then
+    Result := '\\' + Copy(Result, 9, MaxInt)
+  else if Copy(Result, 1, 4) = '\\?\' then
+    Result := Copy(Result, 5, MaxInt);
+end;
+
+function IsReparse(const p: UnicodeString): Boolean;
+var
+  a: DWORD;
+begin
+  a := Attrs(StripTrailingSeps(p));
+  Result := (a <> MdInvalidAttr) and ((a and MdAttrReparse) <> 0);
+end;
+
+function GetEnvW(const name: UnicodeString): UnicodeString;
+var
+  buf: array[0..32767] of WideChar;
+  n: DWORD;
+begin
+  n := MdGetEnvironmentVariableW(PWideChar(name), @buf[0], Length(buf));
+  if (n > 0) and (n < Length(buf)) then
+    Result := UnicodeString(PWideChar(@buf[0]))
+  else
+    Result := '';
+end;
+
+function ReadAllBytes(const p: UnicodeString): TBytes;
+var
+  h: THandle;
+  size, got: DWORD;
+begin
+  SetLength(Result, 0);
+  h := MdCreateFileW(PWideChar(p), MdGenericRead, MdShareRead or MdShareWrite, nil, MdOpenExisting, MdFileAttrNormal, 0);
+  if h = THandle(-1) then
+    raise EMd.CreateW('cannot read ' + p + ': ' + ErrText(MdGetLastError));
+  try
+    size := MdGetFileSize(h, nil);
+    SetLength(Result, size);
+    if size > 0 then
+      if not MdReadFile(h, @Result[0], size, @got, nil) or (got <> size) then
+        raise EMd.CreateW('cannot read ' + p + ': ' + ErrText(MdGetLastError));
+  finally
+    MdCloseHandle(h);
+  end;
+end;
+
+procedure WriteAllBytes(const p: UnicodeString; const data: TBytes);
+var
+  h: THandle;
+  done: DWORD;
+  ok: Boolean;
+begin
+  h := MdCreateFileW(PWideChar(p), MdGenericWrite, 0, nil, MdCreateAlways, MdFileAttrNormal, 0);
+  if h = THandle(-1) then
+    raise EMd.CreateW(p + ': ' + ErrText(MdGetLastError));
+  ok := True;
+  if Length(data) > 0 then
+    ok := MdWriteFile(h, @data[0], Length(data), @done, nil) and (done = DWORD(Length(data)));
+  ok := ok and MdFlushFileBuffers(h);
+  if not ok then
+  begin
+    MdCloseHandle(h);
+    raise EMd.CreateW(p + ': ' + ErrText(MdGetLastError));
+  end;
+  MdCloseHandle(h);
+end;
+
+{ Write to a temp file next to the target, then rename it into place. }
+procedure AtomicWrite(const p: UnicodeString; const data: TBytes);
+var
+  tmp: UnicodeString;
+begin
+  tmp := p + '.' + UnicodeString(IntToHex(Random($7FFFFFFF), 8)) + '.tmp';
+  try
+    WriteAllBytes(tmp, data);
+  except
+    MdDeleteFileW(PWideChar(tmp));
+    raise;
+  end;
+  if not MdMoveFileExW(PWideChar(tmp), PWideChar(p), MdMoveReplace or MdMoveWriteThrough) then
+  begin
+    MdDeleteFileW(PWideChar(tmp));
+    raise EMd.CreateW(p + ': ' + ErrText(MdGetLastError));
+  end;
+end;
+
+{ ---- paths as EleBBS stores them ---- }
+
+function IsAbsolute(const p: UnicodeString): Boolean;
+begin
+  Result := ((Length(p) >= 3) and (p[2] = ':') and IsSep(p[3]))
+         or ((Length(p) >= 2) and IsSep(p[1]) and IsSep(p[2]));
+end;
+
+{ Normalize a stored or scanned path so equal directories compare equal:
+  case, / vs \, trailing separators and 8.3 vs long names are ignored. }
+function ComparablePath(const path: UnicodeString): UnicodeString;
+var
+  s, long: UnicodeString;
+  i: Integer;
+begin
+  s := TrimW(path);
+  if s = '' then Exit('');
+  for i := 1 to Length(s) do
+    if s[i] = '/' then s[i] := '\';
+  long := CallPathApi(1, s);
+  if long <> '' then s := long;
+  if IsAbsolute(s) then s := FullPath(s);
+  s := LowerW(s);
+  Result := StripTrailingSeps(s);
+  if Result = '' then Result := s;
+end;
+
+{ EleBBS builds file names as FilePath + FileName, so keep a trailing \. }
+function FormatAreaPath(const dir: UnicodeString; upper: Boolean): UnicodeString;
+begin
+  Result := StripTrailingSeps(dir) + '\';
+  if upper then Result := UpperW(Result);
+end;
+
+function FitsFilePath(const s: UnicodeString): Boolean;
+begin
+  Result := (Length(s) <= FilePathLen) and Representable(s);
+end;
+
+{ A FilePath that fits in String[40] and in the code page, or '' if none. }
+function FitAreaPath(const dir: UnicodeString; upper: Boolean): UnicodeString;
+var
+  short: UnicodeString;
+begin
+  Result := FormatAreaPath(dir, upper);
+  if FitsFilePath(Result) then Exit;
+  short := CallPathApi(2, dir);
+  if (short <> '') and (short <> dir) then
+  begin
+    Result := FormatAreaPath(short, upper);
+    if FitsFilePath(Result) then Exit;
+  end;
+  Result := '';
+end;
+
+{ Order follows EleBBS 0.11b1: ReadConfigRA looks in the current dir first,
+  then GetSysEnv checks ELEBBS, RA and ELE. }
+function ResolveSystemDir(const option: UnicodeString; out source: UnicodeString): UnicodeString;
+const
+  Vars: array[0..2] of String = ('ELEBBS', 'RA', 'ELE');
+var
+  cwd, v: UnicodeString;
+  i: Integer;
+begin
+  if option <> '' then
+  begin
+    source := '--elebbs-dir';
+    Exit(option);
+  end;
+  cwd := CurrentDir;
+  if FindFileCI(cwd, 'CONFIG.RA') <> '' then
+  begin
+    source := 'current directory (contains CONFIG.RA)';
+    Exit(cwd);
+  end;
+  for i := Low(Vars) to High(Vars) do
+  begin
+    v := TrimW(GetEnvW(UnicodeString(Vars[i])));
+    if v <> '' then
+    begin
+      source := '%' + UnicodeString(Vars[i]) + '%';
+      Exit(v);
+    end;
+  end;
+  source := 'built-in default';
+  Result := DefaultSystemDir;
+end;
+
+{ ---- scanning ---- }
+
+function IsVideo(const name: UnicodeString): Boolean;
+var
+  i, j: Integer;
+  ext: UnicodeString;
+begin
+  Result := False;
+  i := Length(name);
+  while (i > 0) and (name[i] <> '.') and not IsSep(name[i]) do Dec(i);
+  if (i = 0) or (name[i] <> '.') then Exit;
+  j := 1;
+  while (j < i) and (name[j] = '.') do Inc(j);
+  if j >= i then Exit;
+  ext := LowerW(Copy(name, i, MaxInt));
+  Result := (ext = '.mkv') or (ext = '.mov') or (ext = '.mpg') or (ext = '.mp4') or (ext = '.avi');
+end;
+
+procedure SortCaseless(var a: TUStrArray);
+var
+  i, j: Integer;
+  v, k: UnicodeString;
+begin
+  for i := 1 to High(a) do
+  begin
+    v := a[i];
+    k := LowerW(v);
+    j := i - 1;
+    while (j >= 0) and (LowerW(a[j]) > k) do
+    begin
+      a[j + 1] := a[j];
+      Dec(j);
+    end;
+    a[j + 1] := v;
+  end;
+end;
+
+{ Top-down walk: a directory is listed before its subdirectories. }
+procedure FindMediaDirs(const dir: UnicodeString; follow: Boolean; var found: TUStrArray);
+var
+  h: THandle;
+  fd: TWin32FindDataW;
+  name: UnicodeString;
+  subs: TUStrArray;
+  hasVideo: Boolean;
+  i: Integer;
+begin
+  SetLength(subs, 0);
+  hasVideo := False;
+  h := MdFindFirstFileW(PWideChar(JoinPath(dir, '*')), @fd);
+  if h = THandle(-1) then Exit;
+  repeat
+    name := UnicodeString(PWideChar(@fd.cFileName[0]));
+    if (fd.dwFileAttributes and MdAttrDirectory) <> 0 then
+    begin
+      if (name <> '.') and (name <> '..')
+         and (follow or ((fd.dwFileAttributes and MdAttrReparse) = 0)) then
+        AddStr(subs, name);
+    end
+    else if IsVideo(name) then
+      hasVideo := True;
+  until not MdFindNextFileW(h, @fd);
+  MdFindClose(h);
+  if hasVideo then AddStr(found, dir);
+  SortCaseless(subs);
+  for i := 0 to High(subs) do
+    FindMediaDirs(JoinPath(dir, subs[i]), follow, found);
+end;
+
+function TidySegment(const s: UnicodeString): UnicodeString;
+var
+  i, cut: Integer;
+begin
+  Result := '';
+  cut := Pos('-', s);
+  if cut = 0 then cut := Length(s) + 1;
+  for i := 1 to cut - 1 do
+    if not ((s[i] = ' ') and ((Result = '') or (Result[Length(Result)] = ' '))) then
+      Result := Result + s[i];
+  while (Result <> '') and ((Result[Length(Result)] = ' ') or (Result[Length(Result)] = '-')
+    or (Result[Length(Result)] = '_')) do
+    SetLength(Result, Length(Result) - 1);
+  while (Result <> '') and ((Result[1] = '-') or (Result[1] = '_')) do
+    Result := TrimW(Copy(Result, 2, MaxInt));
+end;
+
+{ Drops "(...)" and "[...]" parts and anything after a hyphen in each path
+  segment, e.g. "Alien (1979) [1080p]" -> "Alien", "Heat - BluRay" -> "Heat".
+  Falls back to the original name if nothing would be left. }
+function StripBracketed(const name: UnicodeString): UnicodeString;
+var
+  i, depth: Integer;
+  bare, seg: UnicodeString;
+begin
+  bare := '';
+  depth := 0;
+  for i := 1 to Length(name) do
+    if (name[i] = '(') or (name[i] = '[') then
+      Inc(depth)
+    else if ((name[i] = ')') or (name[i] = ']')) and (depth > 0) then
+      Dec(depth)
+    else if depth = 0 then
+      bare := bare + name[i];
+
+  Result := '';
+  seg := '';
+  for i := 1 to Length(bare) + 1 do
+    if (i > Length(bare)) or IsSep(bare[i]) then
+    begin
+      seg := TidySegment(seg);
+      if seg <> '' then
+        if Result = '' then Result := seg else Result := Result + '\' + seg;
+      seg := '';
+    end
+    else
+      seg := seg + bare[i];
+  if Result = '' then Result := name;
+end;
+
+function RawAreaName(const dir, root: UnicodeString; relative: Boolean): UnicodeString;
+var
+  prefix: UnicodeString;
+begin
+  Result := FileNameOf(StripTrailingSeps(dir));
+  if Result = '' then Result := dir;
+  if relative and (LowerW(dir) <> LowerW(root)) then
+  begin
+    prefix := JoinPath(root, '');
+    if LowerW(Copy(dir, 1, Length(prefix))) = LowerW(prefix) then
+      Result := Copy(dir, Length(prefix) + 1, MaxInt);
+  end;
+end;
+
+function AreaName(const dir, root: UnicodeString; relative: Boolean): UnicodeString;
+begin
+  Result := StripBracketed(RawAreaName(dir, root, relative));
+end;
+
+{ ---- FILES.RA / FILES.ELE / FILES.RDX ---- }
+
+function ReadConfigSysPath(const cfg: TBytes): UnicodeString;
+begin
+  if Length(cfg) < ConfigSysPathOffset + ConfigSysPathLen + 1 then
+    Exit('');
+  Result := GetPStr(cfg[ConfigSysPathOffset], ConfigSysPathLen);
+end;
+
+{ SetFilesEleDefaults in areadef.pas. }
+function EleDefaults(areaNum: LongInt): TEleFilesRecord;
+begin
+  FillChar(Result, SizeOf(Result), 0);
+  Result.AreaNum := areaNum;
+  SetPStr(Result.ftpLoginName, FtpLoginLen, 'anonymous');
+  SetPStr(Result.ftpPassword, FtpPasswordLen, 'john.doe@elebbs.bbs');
+end;
+
+{ Finds FILES.RA / FILES.ELE like OpenRaFile in filerout.pas: the system dir
+  first, then CONFIG.RA's SysPath. Missing files are placed next to FILES.RA. }
+procedure LocateAreaFiles(const sysDir: UnicodeString; var af: TAreaFiles);
+var
+  search: TUStrArray;
+  config, sp: UnicodeString;
+
+  function Lookup(const name: UnicodeString): UnicodeString;
+  var
+    i: Integer;
+  begin
+    for i := 0 to High(search) do
+      if IsDir(search[i]) then
+      begin
+        Result := FindFileCI(search[i], name);
+        if Result <> '' then Exit;
+      end;
+    Result := '';
+  end;
+
+begin
+  SetLength(search, 0);
+  AddStr(search, sysDir);
+  config := FindFileCI(sysDir, 'CONFIG.RA');
+  if config <> '' then
+  begin
+    sp := TrimW(ReadConfigSysPath(ReadAllBytes(config)));
+    if sp <> '' then AddStr(search, sp);
+  end;
+  af.FilesRa := Lookup('FILES.RA');
+  if af.FilesRa = '' then af.FilesRa := JoinPath(sysDir, 'FILES.RA');
+  af.FilesEle := Lookup('FILES.ELE');
+  if af.FilesEle = '' then af.FilesEle := JoinPath(DirOf(af.FilesRa), 'FILES.ELE');
+  af.FilesRdx := FindFileCI(DirOf(af.FilesRa), 'FILES.RDX');
+  if af.FilesRdx = '' then af.FilesRdx := JoinPath(DirOf(af.FilesRa), 'FILES.RDX');
+end;
+
+procedure LoadAreaFiles(const sysDir: UnicodeString; var af: TAreaFiles);
+var
+  raCount, eleCount, missing: Integer;
+begin
+  if not IsDir(sysDir) then
+    raise EMd.CreateW('EleBBS system dir not found: ' + sysDir);
+  LocateAreaFiles(sysDir, af);
+  SetLength(af.RaData, 0);
+  SetLength(af.EleData, 0);
+  if IsFile(af.FilesRa) then af.RaData := ReadAllBytes(af.FilesRa);
+  if IsFile(af.FilesEle) then af.EleData := ReadAllBytes(af.FilesEle);
+
+  if Length(af.RaData) mod SizeOf(TFilesRecord) <> 0 then
+    raise EMd.CreateW(FileNameOf(af.FilesRa) + ' is ' + IntToStr(Length(af.RaData))
+      + ' bytes, not a multiple of the ' + IntToStr(SizeOf(TFilesRecord))
+      + '-byte record size; refusing to touch it');
+  if Length(af.EleData) mod SizeOf(TEleFilesRecord) <> 0 then
+    raise EMd.CreateW(FileNameOf(af.FilesEle) + ' is ' + IntToStr(Length(af.EleData))
+      + ' bytes, not a multiple of the ' + IntToStr(SizeOf(TEleFilesRecord))
+      + '-byte record size; refusing to touch it');
+
+  raCount := Length(af.RaData) div SizeOf(TFilesRecord);
+  eleCount := Length(af.EleData) div SizeOf(TEleFilesRecord);
+  if eleCount > raCount then
+    raise EMd.CreateW(FileNameOf(af.FilesEle) + ' has ' + IntToStr(eleCount) + ' records but '
+      + FileNameOf(af.FilesRa) + ' has ' + IntToStr(raCount)
+      + '; the files are out of sync. Open the file areas in ELCONFIG to repair them first.');
+
+  SetLength(af.Ra, raCount);
+  if raCount > 0 then Move(af.RaData[0], af.Ra[0], raCount * SizeOf(TFilesRecord));
+  SetLength(af.Ele, eleCount);
+  if eleCount > 0 then Move(af.EleData[0], af.Ele[0], eleCount * SizeOf(TEleFilesRecord));
+
+  SetLength(af.Warnings, 0);
+  if not IsFile(af.FilesRa) then
+    AddStr(af.Warnings, af.FilesRa + ' does not exist yet; it will be created');
+  missing := raCount - eleCount;
+  if missing > 0 then
+    AddStr(af.Warnings, FileNameOf(af.FilesEle) + ' is ' + IntToStr(missing)
+      + ' record(s) shorter than ' + FileNameOf(af.FilesRa)
+      + '; EleBBS default FILES.ELE records will be added for those indexes first');
+end;
+
+procedure AddExisting(var ex: TExisting; const key, desc: UnicodeString);
+var
+  i: Integer;
+begin
+  if key = '' then Exit;
+  for i := 0 to High(ex.Keys) do
+    if ex.Keys[i] = key then Exit;
+  AddStr(ex.Keys, key);
+  AddStr(ex.Descs, desc);
+end;
+
+function FindExisting(const ex: TExisting; const key: UnicodeString): Integer;
+begin
+  for Result := 0 to High(ex.Keys) do
+    if ex.Keys[Result] = key then Exit;
+  Result := -1;
+end;
+
+{ Duplicates: FILES.RA FilePath, or FILES.ELE ftpPath when it is a local path. }
+procedure CollectExisting(const af: TAreaFiles; var ex: TExisting);
+var
+  i: Integer;
+  ftp, path, desc: UnicodeString;
+begin
+  for i := 0 to High(af.Ra) do
+  begin
+    path := GetPStr(af.Ra[i].FilePath, FilePathLen);
+    desc := FileNameOf(af.FilesRa) + ' record ' + IntToStr(i + 1) + ' (area '
+      + IntToStr(af.Ra[i].AreaNum) + ', ''' + GetPStr(af.Ra[i].Name, NameLen) + ''')';
+    AddExisting(ex, ComparablePath(path), desc);
+    if (TrimW(path) <> '') and IsReparse(path) then
+      AddExisting(ex, ComparablePath(FinalPath(path)), desc + ' via symlink ' + path);
+  end;
+  for i := 0 to High(af.Ele) do
+  begin
+    ftp := GetPStr(af.Ele[i].ftpPath, FtpPathLen);
+    if LowerW(Copy(ftp, 1, 6)) = 'ftp://' then Continue;
+    AddExisting(ex, ComparablePath(ftp),
+      FileNameOf(af.FilesEle) + ' record ' + IntToStr(i + 1) + ' (ftpPath)');
+  end;
+end;
+
+function FindTemplate(const af: TAreaFiles; areaNum: Integer; out ra: TFilesRecord; out ele: TEleFilesRecord): Boolean;
+var
+  i: Integer;
+begin
+  for i := 0 to High(af.Ra) do
+    if af.Ra[i].AreaNum = areaNum then
+    begin
+      ra := af.Ra[i];
+      if i <= High(af.Ele) then
+        ele := af.Ele[i]
+      else
+        ele := EleDefaults(ra.AreaNum);
+      Exit(True);
+    end;
+  Result := False;
+end;
+
+function LinkName(areaNum: Integer): UnicodeString;
+begin
+  Result := UnicodeString(IntToStr(areaNum));
+  while Length(Result) < LinkNameWidth - 1 do Result := '0' + Result;
+  Result := 'A' + Result;
+end;
+
+procedure MakePlan(const af: TAreaFiles; const dirs, names: TUStrArray;
+  useTemplate: Boolean; const tplRa: TFilesRecord; const tplEle: TEleFilesRecord;
+  security: Integer; upperPaths: Boolean; const linkDir: UnicodeString; var plan: TPlan);
+var
+  ex: TExisting;
+  used: array of Boolean;
+  nextFree, nextIndex, i, k: Integer;
+  key, filePath, linkPath: UnicodeString;
+  p: TPlanned;
+  nameBytes: TBytes;
+
+  procedure Skip(const dir, reason: UnicodeString);
+  begin
+    SetLength(plan.Skipped, Length(plan.Skipped) + 1);
+    plan.Skipped[High(plan.Skipped)].SourceDir := dir;
+    plan.Skipped[High(plan.Skipped)].Reason := reason;
+  end;
+
+begin
+  SetLength(ex.Keys, 0);
+  SetLength(ex.Descs, 0);
+  CollectExisting(af, ex);
+
+  SetLength(used, MaxAreaNum + 1);
+  for i := 0 to High(af.Ra) do used[af.Ra[i].AreaNum] := True;
+  for i := 0 to High(af.Ele) do
+    if (af.Ele[i].AreaNum >= 0) and (af.Ele[i].AreaNum <= MaxAreaNum) then
+      used[af.Ele[i].AreaNum] := True;
+  nextFree := 1;
+  nextIndex := Length(af.Ra);
+
+  for i := 0 to High(dirs) do
+  begin
+    key := ComparablePath(dirs[i]);
+    k := FindExisting(ex, key);
+    if k >= 0 then
+    begin
+      Skip(dirs[i], 'already an area: ' + ex.Descs[k]);
+      Continue;
+    end;
+    while (nextFree <= MaxAreaNum) and used[nextFree] do Inc(nextFree);
+    if nextFree > MaxAreaNum then
+    begin
+      Skip(dirs[i], 'no free area numbers left (max 65535)');
+      Continue;
+    end;
+    p.LinkPath := '';
+    p.LinkExists := False;
+    filePath := FitAreaPath(dirs[i], upperPaths);
+    if (filePath = '') and (linkDir <> '') then
+    begin
+      linkPath := JoinPath(linkDir, LinkName(nextFree));
+      if Attrs(linkPath) <> MdInvalidAttr then
+      begin
+        if ComparablePath(FinalPath(linkPath)) <> key then
+        begin
+          Skip(dirs[i], linkPath + ' already exists and doesn''t point to this folder');
+          Continue;
+        end;
+        p.LinkExists := True;
+      end;
+      p.LinkPath := linkPath;
+      filePath := FormatAreaPath(linkPath, upperPaths);
+    end;
+    if filePath = '' then
+    begin
+      if not Representable(FormatAreaPath(dirs[i], upperPaths)) then
+        Skip(dirs[i], 'path has characters code page ' + IntToStr(CodePage) + ' can''t store')
+      else
+        Skip(dirs[i], 'path too long: ' + FormatAreaPath(dirs[i], upperPaths) + ' is '
+          + IntToStr(Length(FormatAreaPath(dirs[i], upperPaths)))
+          + ' characters, EleBBS allows 40 and there is no short 8.3 name (use --link-dir)');
+      Continue;
+    end;
+
+    if useTemplate then
+    begin
+      p.Ra := tplRa;
+      NormalizePStr(p.Ra.PassWord, PasswordLen);
+      p.Ele := tplEle;
+      SetPStr(p.Ele.ExportURL, ExportUrlLen, '');
+      SetPStr(p.Ele.ftpPath, FtpPathLen, '');
+      NormalizePStr(p.Ele.ftpLoginName, FtpLoginLen);
+      NormalizePStr(p.Ele.ftpPassword, FtpPasswordLen);
+    end
+    else
+    begin
+      FillChar(p.Ra, SizeOf(p.Ra), 0);
+      p.Ele := EleDefaults(0);
+    end;
+    p.Ra.AreaNum := nextFree;
+    p.Ele.AreaNum := nextFree;
+    SetPStr(p.Ra.Name, NameLen, names[i]);
+    SetPStr(p.Ra.FilePath, FilePathLen, filePath);
+    if security >= 0 then
+    begin
+      p.Ra.Security := security;
+      p.Ra.ListSecurity := security;
+    end;
+    nameBytes := EncodeCP(names[i]);
+    p.TruncatedName := Length(nameBytes) > NameLen;
+    p.Index := nextIndex;
+    p.SourceDir := dirs[i];
+
+    SetLength(plan.New, Length(plan.New) + 1);
+    plan.New[High(plan.New)] := p;
+    used[nextFree] := True;
+    AddExisting(ex, key, 'new area ' + IntToStr(nextFree));
+    Inc(nextIndex);
+  end;
+end;
+
+{ GenerateRDXFiles in gencfg.pas: entry AreaNum-1 holds the 1-based FILES.RA
+  record index of that area; unused numbers hold 0. }
+function BuildRdx(const areaNums: array of Integer): TBytes;
+var
+  table: array of Word;
+  maxArea, i: Integer;
+begin
+  maxArea := 0;
+  for i := 0 to High(areaNums) do
+    if areaNums[i] > maxArea then maxArea := areaNums[i];
+  SetLength(table, maxArea);
+  for i := 0 to High(table) do table[i] := 0;
+  for i := 0 to High(areaNums) do
+    if areaNums[i] > 0 then
+      table[areaNums[i] - 1] := Word((i + 1) and $FFFF);
+  SetLength(Result, maxArea * 2);
+  if maxArea > 0 then Move(table[0], Result[0], maxArea * 2);
+end;
+
+function BackupFiles(const af: TAreaFiles): TUStrArray;
+var
+  stamp, target: UnicodeString;
+  files: array[0..2] of UnicodeString;
+  i: Integer;
+begin
+  SetLength(Result, 0);
+  stamp := UnicodeString(FormatDateTime('yyyymmdd"-"hhnnss', Now));
+  files[0] := af.FilesRa;
+  files[1] := af.FilesEle;
+  files[2] := af.FilesRdx;
+  for i := 0 to 2 do
+    if IsFile(files[i]) then
+    begin
+      target := files[i] + '.' + stamp + '.bak';
+      if not MdCopyFileW(PWideChar(files[i]), PWideChar(target), False) then
+        raise EMd.CreateW('backing up ' + files[i] + ' failed: ' + ErrText(MdGetLastError));
+      AddStr(Result, target);
+    end;
+end;
+
+procedure AppendBytes(var dst: TBytes; const src; size: Integer);
+var
+  old: Integer;
+begin
+  if size <= 0 then Exit;
+  old := Length(dst);
+  SetLength(dst, old + size);
+  Move(src, dst[old], size);
+end;
+
+{ FILES.RA is written first: if the run dies before FILES.ELE is written, the
+  ELE file is merely short, which both EleBBS and this tool can repair. }
+procedure WritePlan(const af: TAreaFiles; const plan: TPlan);
+var
+  raOut, eleOut: TBytes;
+  pad: TEleFilesRecord;
+  areaNums: array of Integer;
+  i, n: Integer;
+begin
+  raOut := Copy(af.RaData, 0, Length(af.RaData));
+  eleOut := Copy(af.EleData, 0, Length(af.EleData));
+  for i := Length(af.Ele) to High(af.Ra) do
+  begin
+    pad := EleDefaults(af.Ra[i].AreaNum);
+    AppendBytes(eleOut, pad, SizeOf(pad));
+  end;
+  for i := 0 to High(plan.New) do
+  begin
+    AppendBytes(raOut, plan.New[i].Ra, SizeOf(TFilesRecord));
+    AppendBytes(eleOut, plan.New[i].Ele, SizeOf(TEleFilesRecord));
+  end;
+  if Length(raOut) div SizeOf(TFilesRecord) <> Length(eleOut) div SizeOf(TEleFilesRecord) then
+    raise EMd.CreateW('internal error: FILES.RA and FILES.ELE record counts differ');
+
+  n := Length(af.Ra) + Length(plan.New);
+  SetLength(areaNums, n);
+  for i := 0 to High(af.Ra) do areaNums[i] := af.Ra[i].AreaNum;
+  for i := 0 to High(plan.New) do areaNums[Length(af.Ra) + i] := plan.New[i].Ra.AreaNum;
+
+  AtomicWrite(af.FilesRa, raOut);
+  try
+    AtomicWrite(af.FilesEle, eleOut);
+  except
+    AtomicWrite(af.FilesRa, af.RaData);
+    raise;
+  end;
+  AtomicWrite(af.FilesRdx, BuildRdx(areaNums));
+end;
+
+procedure RemoveLinks(const created: TUStrArray);
+var
+  i: Integer;
+begin
+  for i := 0 to High(created) do
+    MdRemoveDirectoryW(PWideChar(created[i]));
+end;
+
+{ Directory symlinks for areas whose real path doesn't fit FilePath. Already
+  created links are removed again if one of them fails. }
+function CreateLinks(const linkDir: UnicodeString; const plan: TPlan): TUStrArray;
+var
+  i: Integer;
+  err: DWORD;
+  msg: UnicodeString;
+begin
+  SetLength(Result, 0);
+  for i := 0 to High(plan.New) do
+  begin
+    if (plan.New[i].LinkPath = '') or plan.New[i].LinkExists then Continue;
+    if not IsDir(linkDir) and not MdCreateDirectoryW(PWideChar(linkDir), nil) then
+      raise EMd.CreateW('cannot create ' + linkDir + ': ' + ErrText(MdGetLastError));
+    if not MdCreateSymbolicLinkW(PWideChar(plan.New[i].LinkPath), PWideChar(plan.New[i].SourceDir),
+       MdSymlinkDirectory or MdSymlinkUnprivileged) then
+    begin
+      err := MdGetLastError;
+      if err = MdErrorInvalidParameter then
+        if MdCreateSymbolicLinkW(PWideChar(plan.New[i].LinkPath), PWideChar(plan.New[i].SourceDir),
+           MdSymlinkDirectory) then
+        begin
+          AddStr(Result, plan.New[i].LinkPath);
+          Continue;
+        end
+        else
+          err := MdGetLastError;
+      RemoveLinks(Result);
+      msg := 'cannot create symlink ' + plan.New[i].LinkPath + ' -> ' + plan.New[i].SourceDir + ': ' + ErrText(err);
+      if err = MdErrorPrivilegeNotHeld then
+        msg := msg + '. Run mediadirs as administrator or turn on Windows Developer Mode.';
+      raise EMd.CreateW(msg);
+    end;
+    AddStr(Result, plan.New[i].LinkPath);
+  end;
+end;
+
+{ ---- command line ---- }
+
+const
+  Usage = 'usage: mediadirs [-h] [--elebbs-dir DIR] [--dry-run] [--name-style {leaf,relative}]'
+    + #13#10 + '                 [--no-backup] [--template-area N] [--security LEVEL]'
+    + #13#10 + '                 [--uppercase-paths] [--encoding CP] [--follow-symlinks]'
+    + #13#10 + '                 [--link-dir DIR] [--version] start_dir';
+
+procedure PrintHelp;
+begin
+  Say(Usage);
+  Say('');
+  Say('Scan a directory tree for folders that directly contain video files (.avi, .mkv,');
+  Say('.mov, .mp4, .mpg) and add each one as an EleBBS 0.11b1 file area in FILES.RA and');
+  Say('FILES.ELE.');
+  Say('');
+  Say('positional arguments:');
+  Say('  start_dir             directory to scan recursively');
+  Say('');
+  Say('options:');
+  Say('  -h, --help            show this help message and exit');
+  Say('  --elebbs-dir DIR      EleBBS system dir holding CONFIG.RA, CONFIG.ELE, FILES.RA');
+  Say('                        and FILES.ELE (default: current dir if it has CONFIG.RA,');
+  Say('                        then %ELEBBS%, %RA%, %ELE%, then c:\ele)');
+  Say('  --dry-run             print the planned areas without writing');
+  Say('  --name-style {leaf,relative}');
+  Say('                        area name: the directory''s path after START_DIR');
+  Say('                        (relative, default) or just its own name (leaf)');
+  Say('  --no-backup           don''t copy FILES.RA, FILES.ELE and FILES.RDX to *.bak');
+  Say('                        before writing');
+  Say('  --template-area N     copy security, flags, group and other settings from');
+  Say('                        existing area number N');
+  Say('  --security LEVEL      download and list security level for new areas (EleBBS');
+  Say('                        default: 0)');
+  Say('  --uppercase-paths     store paths in upper case, DOS style');
+  Say('  --encoding CP         code page for names and paths in the records (default:');
+  Say('                        cp437)');
+  Say('  --follow-symlinks     descend into symlinked directories');
+  Say('  --link-dir DIR        for folders whose path won''t fit in 40 characters, create');
+  Say('                        a directory symlink DIR\A<area number> pointing to the');
+  Say('                        folder and store that instead (needs admin rights or');
+  Say('                        Developer Mode), e.g. --link-dir C:\ELE\MEDIA');
+  Say('  --version             show program''s version number and exit');
+end;
+
+procedure UsageError(const msg: UnicodeString);
+begin
+  Complain(Usage);
+  Complain('mediadirs: error: ' + msg);
+  Halt(2);
+end;
+
+function ParseInt(const opt, value: UnicodeString; lo, hi: Integer): Integer;
+begin
+  if not TryStrToInt(String(value), Result) then
+    UsageError('argument ' + opt + ': invalid int value: ''' + value + '''');
+  if (Result < lo) or (Result > hi) then
+    UsageError('argument ' + opt + ': must be between ' + IntToStr(lo) + ' and ' + IntToStr(hi));
+end;
+
+function ParseCodePage(const value: UnicodeString): UINT;
+var
+  s: UnicodeString;
+  n: Integer;
+begin
+  s := LowerW(TrimW(value));
+  if Copy(s, 1, 2) = 'cp' then s := Copy(s, 3, MaxInt);
+  if not TryStrToInt(String(s), n) or (n <= 0) or not MdIsValidCodePage(n) then
+    UsageError('argument --encoding: unknown code page: ''' + value + '''');
+  Result := n;
+end;
+
+function RunMain: Integer;
+var
+  argv: PPWideChar;
+  argc, i, eq: LongInt;
+  a, opt, value: UnicodeString;
+  hasValue, optionsDone: Boolean;
+  startArg, elebbsDir, sysDir, source, start: UnicodeString;
+  dryRun, relative, backup, upperPaths, follow, useTemplate: Boolean;
+  templateArea, security: Integer;
+  af: TAreaFiles;
+  tplRa: TFilesRecord;
+  tplEle: TEleFilesRecord;
+  dirs, names, backups, links: TUStrArray;
+  plan: TPlan;
+  note, line, linkDir: UnicodeString;
+
+  function TakeValue: UnicodeString;
+  begin
+    if hasValue then Exit(value);
+    Inc(i);
+    if i >= argc then UsageError('argument ' + opt + ': expected one argument');
+    Result := UnicodeString(argv[i]);
+  end;
+
+begin
+  startArg := '';
+  elebbsDir := '';
+  linkDir := '';
+  dryRun := False;
+  relative := True;
+  backup := True;
+  upperPaths := False;
+  follow := False;
+  templateArea := 0;
+  security := -1;
+  optionsDone := False;
+
+  argv := MdCommandLineToArgvW(MdGetCommandLineW, @argc);
+  i := 1;
+  while i < argc do
+  begin
+    a := UnicodeString(argv[i]);
+    if not optionsDone and (a = '--') then
+      optionsDone := True
+    else if not optionsDone and (Length(a) > 1) and (a[1] = '-') then
+    begin
+      opt := a;
+      value := '';
+      hasValue := False;
+      eq := Pos('=', a);
+      if (Copy(a, 1, 2) = '--') and (eq > 0) then
+      begin
+        opt := Copy(a, 1, eq - 1);
+        value := Copy(a, eq + 1, MaxInt);
+        hasValue := True;
+      end;
+      if (opt = '-h') or (opt = '--help') then
+      begin
+        PrintHelp;
+        Exit(0);
+      end
+      else if opt = '--version' then
+      begin
+        Say('mediadirs ' + AppVersion);
+        Exit(0);
+      end
+      else if opt = '--elebbs-dir' then elebbsDir := TakeValue
+      else if opt = '--dry-run' then dryRun := True
+      else if opt = '--name-style' then
+      begin
+        value := TakeValue;
+        if value = 'relative' then relative := True
+        else if value = 'leaf' then relative := False
+        else UsageError('argument --name-style: invalid choice: ''' + value + ''' (choose from ''leaf'', ''relative'')');
+      end
+      else if opt = '--no-backup' then backup := False
+      else if opt = '--template-area' then templateArea := ParseInt(opt, TakeValue, 1, MaxAreaNum)
+      else if opt = '--security' then security := ParseInt(opt, TakeValue, 0, 65535)
+      else if opt = '--uppercase-paths' then upperPaths := True
+      else if opt = '--encoding' then CodePage := ParseCodePage(TakeValue)
+      else if opt = '--follow-symlinks' then follow := True
+      else if opt = '--link-dir' then linkDir := TakeValue
+      else UsageError('unrecognized arguments: ' + a);
+    end
+    else if startArg = '' then
+      startArg := a
+    else
+      UsageError('unrecognized arguments: ' + a);
+    Inc(i);
+  end;
+  MdLocalFree(argv);
+
+  if startArg = '' then
+    UsageError('the following arguments are required: start_dir');
+
+  start := FullPath(startArg);
+  if not IsDriveRoot(start) then start := StripTrailingSeps(start);
+  if not IsDir(start) then
+  begin
+    Complain('error: start dir not found: ' + startArg);
+    Exit(2);
+  end;
+
+  if linkDir <> '' then
+  begin
+    linkDir := FullPath(linkDir);
+    if not IsDriveRoot(linkDir) then linkDir := StripTrailingSeps(linkDir);
+    if Length(FormatAreaPath(JoinPath(linkDir, LinkName(1)), upperPaths)) > FilePathLen then
+      UsageError('argument --link-dir: ' + linkDir + ' is too long; links like '
+        + FormatAreaPath(JoinPath(linkDir, LinkName(1)), upperPaths) + ' must fit in 40 characters');
+    if not Representable(linkDir) then
+      UsageError('argument --link-dir: ' + linkDir + ' has characters code page '
+        + IntToStr(CodePage) + ' can''t store');
+  end;
+
+  sysDir := ResolveSystemDir(elebbsDir, source);
+  if not IsDriveRoot(sysDir) and (StripTrailingSeps(sysDir) <> '') then
+    sysDir := StripTrailingSeps(sysDir);
+  try
+    LoadAreaFiles(sysDir, af);
+    useTemplate := templateArea > 0;
+    if useTemplate and not FindTemplate(af, templateArea, tplRa, tplEle) then
+      raise EMd.CreateW('template area ' + IntToStr(templateArea) + ' not found in ' + FileNameOf(af.FilesRa));
+  except
+    on e: EMd do
+    begin
+      Complain('error: ' + e.WMsg);
+      Exit(1);
+    end;
+  end;
+
+  Say('EleBBS system dir: ' + sysDir + ' (from ' + source + ')');
+  Say('  ' + af.FilesRa + ': ' + IntToStr(Length(af.Ra)) + ' area(s)');
+  Say('  ' + af.FilesEle + ': ' + IntToStr(Length(af.Ele)) + ' record(s)');
+  for i := 0 to High(af.Warnings) do
+    Complain('warning: ' + af.Warnings[i]);
+
+  SetLength(dirs, 0);
+  FindMediaDirs(start, follow, dirs);
+  SetLength(names, Length(dirs));
+  for i := 0 to High(dirs) do
+    names[i] := AreaName(dirs[i], start, relative);
+
+  if not useTemplate then
+  begin
+    FillChar(tplRa, SizeOf(tplRa), 0);
+    FillChar(tplEle, SizeOf(tplEle), 0);
+  end;
+  SetLength(plan.New, 0);
+  SetLength(plan.Skipped, 0);
+  MakePlan(af, dirs, names, useTemplate, tplRa, tplEle, security, upperPaths, linkDir, plan);
+
+  Say('');
+  if Length(dirs) = 1 then
+    Say('Found 1 directory with video files under ' + start)
+  else
+    Say('Found ' + IntToStr(Length(dirs)) + ' directories with video files under ' + start);
+
+  if Length(plan.New) > 0 then
+  begin
+    Say('');
+    if dryRun then line := 'Would add ' else line := 'Adding ';
+    Say(line + IntToStr(Length(plan.New)) + ' area(s):');
+    Say('  ' + PadLeft('rec', 5) + '  ' + PadLeft('area', 5) + '  ' + PadRight('name', 40) + '  path');
+    for i := 0 to High(plan.New) do
+    begin
+      if plan.New[i].TruncatedName then note := '  (name truncated)' else note := '';
+      if plan.New[i].LinkPath <> '' then
+        note := note + '  (symlink to ' + plan.New[i].SourceDir + ')';
+      Say('  ' + PadLeft(IntToStr(plan.New[i].Index + 1), 5)
+        + '  ' + PadLeft(IntToStr(plan.New[i].Ra.AreaNum), 5)
+        + '  ' + PadRight(GetPStr(plan.New[i].Ra.Name, NameLen), 40)
+        + '  ' + GetPStr(plan.New[i].Ra.FilePath, FilePathLen) + note);
+    end;
+  end;
+  if Length(plan.Skipped) > 0 then
+  begin
+    Say('');
+    Say('Skipped ' + IntToStr(Length(plan.Skipped)) + ':');
+    for i := 0 to High(plan.Skipped) do
+      Say('  ' + RawAreaName(plan.Skipped[i].SourceDir, start, True) + ': ' + plan.Skipped[i].Reason);
+  end;
+
+  if Length(plan.New) = 0 then
+  begin
+    Say('');
+    Say('Nothing to add.');
+    Exit(0);
+  end;
+  if dryRun then
+  begin
+    Say('');
+    Say('Dry run: no files were changed.');
+    Exit(0);
+  end;
+
+  SetLength(links, 0);
+  try
+    links := CreateLinks(linkDir, plan);
+  except
+    on e: EMd do
+    begin
+      Complain('error: ' + e.WMsg);
+      Complain('No files were changed.');
+      Exit(1);
+    end;
+  end;
+  if Length(links) > 0 then
+    Say('Created ' + IntToStr(Length(links)) + ' symlink(s) in ' + linkDir);
+
+  try
+    if backup then
+    begin
+      backups := BackupFiles(af);
+      for i := 0 to High(backups) do
+        Say('Backed up to ' + backups[i]);
+    end;
+    WritePlan(af, plan);
+  except
+    on e: EMd do
+    begin
+      RemoveLinks(links);
+      Complain('error: writing area files failed: ' + e.WMsg);
+      Exit(1);
+    end;
+  end;
+
+  Say('');
+  Say('Wrote ' + IntToStr(Length(plan.New)) + ' area(s). ' + FileNameOf(af.FilesRa) + ' and '
+    + FileNameOf(af.FilesEle) + ' now hold ' + IntToStr(Length(af.Ra) + Length(plan.New))
+    + ' records each; ' + FileNameOf(af.FilesRdx) + ' was rebuilt.');
+  Result := 0;
+end;
+
+begin
+  if (SizeOf(TFilesRecord) <> 168) or (SizeOf(TEleFilesRecord) <> 1139) then
+  begin
+    Complain('internal error: record sizes don''t match EleBBS 0.11b1');
+    Halt(3);
+  end;
+  Randomize;
+  ExitCode := RunMain;
+end.
