@@ -1,7 +1,8 @@
-program mediadirs;
+program filedirs;
 
 { Create EleBBS 0.11b1 file areas (FILES.RA + FILES.ELE, FILES.RDX rebuilt)
-  for every directory under START_DIR that directly holds video files.
+  for every directory under START_DIR that directly holds files with the
+  chosen extensions (video files by default).
   Record layouts follow FILESrecord and EleFilesRecord in struct.250 of the
   EleBBS 0.11b1 source (github.com/mbek/elebbs, commit 0d026e2). }
 
@@ -654,6 +655,46 @@ end;
 
 { ---- scanning ---- }
 
+const
+  DefaultExtensions = 'avi,mkv,mov,mp4,mpg';
+
+var
+  Extensions: TUStrArray;
+
+{ "mkv, .MP4,avi" -> ('.mkv', '.mp4', '.avi'); False if the list has no entries. }
+function ParseExtensions(const list: UnicodeString; var exts: TUStrArray): Boolean;
+var
+  i: Integer;
+  item: UnicodeString;
+begin
+  SetLength(exts, 0);
+  item := '';
+  for i := 1 to Length(list) + 1 do
+    if (i > Length(list)) or (list[i] = ',') then
+    begin
+      item := LowerW(TrimW(item));
+      while (item <> '') and ((item[1] = '*') or (item[1] = '.')) do
+        item := Copy(item, 2, MaxInt);
+      if item <> '' then AddStr(exts, '.' + item);
+      item := '';
+    end
+    else
+      item := item + list[i];
+  Result := Length(exts) > 0;
+end;
+
+function ExtensionList: UnicodeString;
+var
+  i: Integer;
+begin
+  Result := '';
+  for i := 0 to High(Extensions) do
+  begin
+    if Result <> '' then Result := Result + ', ';
+    Result := Result + Extensions[i];
+  end;
+end;
+
 function IsVideo(const name: UnicodeString): Boolean;
 var
   i, j: Integer;
@@ -667,7 +708,8 @@ begin
   while (j < i) and (name[j] = '.') do Inc(j);
   if j >= i then Exit;
   ext := LowerW(Copy(name, i, MaxInt));
-  Result := (ext = '.mkv') or (ext = '.mov') or (ext = '.mpg') or (ext = '.mp4') or (ext = '.avi');
+  for j := 0 to High(Extensions) do
+    if ext = Extensions[j] then Exit(True);
 end;
 
 procedure SortCaseless(var a: TUStrArray);
@@ -1193,7 +1235,7 @@ begin
       RemoveLinks(Result);
       msg := 'cannot create symlink ' + plan.New[i].LinkPath + ' -> ' + plan.New[i].SourceDir + ': ' + ErrText(err);
       if err = MdErrorPrivilegeNotHeld then
-        msg := msg + '. Run mediadirs as administrator or turn on Windows Developer Mode.';
+        msg := msg + '. Run filedirs as administrator or turn on Windows Developer Mode.';
       raise EMd.CreateW(msg);
     end;
     AddStr(Result, plan.New[i].LinkPath);
@@ -1203,18 +1245,18 @@ end;
 { ---- command line ---- }
 
 const
-  Usage = 'usage: mediadirs [-h] [--elebbs-dir DIR] [--dry-run] [--name-style {leaf,relative}]'
-    + #13#10 + '                 [--no-backup] [--template-area N] [--security LEVEL]'
-    + #13#10 + '                 [--uppercase-paths] [--encoding CP] [--follow-symlinks]'
-    + #13#10 + '                 [--link-dir DIR] [--version] start_dir';
+  Usage = 'usage: filedirs [-h] [--elebbs-dir DIR] [--dry-run] [--name-style {leaf,relative}]'
+    + #13#10 + '                [--no-backup] [--template-area N] [--security LEVEL]'
+    + #13#10 + '                [--uppercase-paths] [--encoding CP] [--follow-symlinks]'
+    + #13#10 + '                [--link-dir DIR] [--ext LIST] [--version] start_dir';
 
 procedure PrintHelp;
 begin
   Say(Usage);
   Say('');
-  Say('Scan a directory tree for folders that directly contain video files (.avi, .mkv,');
-  Say('.mov, .mp4, .mpg) and add each one as an EleBBS 0.11b1 file area in FILES.RA and');
-  Say('FILES.ELE.');
+  Say('Scan a directory tree for folders that directly contain files with the given');
+  Say('extensions (default: ' + DefaultExtensions + ') and add each one as an EleBBS 0.11b1');
+  Say('file area in FILES.RA and FILES.ELE.');
   Say('');
   Say('positional arguments:');
   Say('  start_dir             directory to scan recursively');
@@ -1242,13 +1284,15 @@ begin
   Say('                        a directory symlink DIR\A<area number> pointing to the');
   Say('                        folder and store that instead (needs admin rights or');
   Say('                        Developer Mode), e.g. --link-dir C:\ELE\MEDIA');
+  Say('  --ext LIST            comma-separated file extensions to look for, any case,');
+  Say('                        e.g. --ext mkv,mp4,avi,m4v (default: ' + DefaultExtensions + ')');
   Say('  --version             show program''s version number and exit');
 end;
 
 procedure UsageError(const msg: UnicodeString);
 begin
   Complain(Usage);
-  Complain('mediadirs: error: ' + msg);
+  Complain('filedirs: error: ' + msg);
   Halt(2);
 end;
 
@@ -1309,6 +1353,8 @@ begin
   security := -1;
   optionsDone := False;
 
+  ParseExtensions(DefaultExtensions, Extensions);
+
   argv := MdCommandLineToArgvW(MdGetCommandLineW, @argc);
   i := 1;
   while i < argc do
@@ -1335,7 +1381,7 @@ begin
       end
       else if opt = '--version' then
       begin
-        Say('mediadirs ' + AppVersion);
+        Say('filedirs ' + AppVersion);
         Exit(0);
       end
       else if opt = '--elebbs-dir' then elebbsDir := TakeValue
@@ -1354,6 +1400,11 @@ begin
       else if opt = '--encoding' then CodePage := ParseCodePage(TakeValue)
       else if opt = '--follow-symlinks' then follow := True
       else if opt = '--link-dir' then linkDir := TakeValue
+      else if opt = '--ext' then
+      begin
+        if not ParseExtensions(TakeValue, Extensions) then
+          UsageError('argument --ext: no extensions given');
+      end
       else UsageError('unrecognized arguments: ' + a);
     end
     else if startArg = '' then
@@ -1426,9 +1477,9 @@ begin
 
   Say('');
   if Length(dirs) = 1 then
-    Say('Found 1 directory with video files under ' + start)
+    Say('Found 1 directory with ' + ExtensionList + ' files under ' + start)
   else
-    Say('Found ' + IntToStr(Length(dirs)) + ' directories with video files under ' + start);
+    Say('Found ' + IntToStr(Length(dirs)) + ' directories with ' + ExtensionList + ' files under ' + start);
 
   if Length(plan.New) > 0 then
   begin
