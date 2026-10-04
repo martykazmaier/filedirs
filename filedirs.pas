@@ -4,16 +4,24 @@ program filedirs;
   for every directory under START_DIR that directly holds files with the
   chosen extensions (video files by default).
   Record layouts follow FILESrecord and EleFilesRecord in struct.250 of the
-  EleBBS 0.11b1 source (github.com/mbek/elebbs, commit 0d026e2). }
+  EleBBS 0.11b1 source (github.com/mbek/elebbs, commit 0d026e2).
+  Builds for Win32 and Linux; platform code lives in platform_*.inc. }
 
 {$mode objfpc}{$H+}
+{$IFDEF WINDOWS}
 {$APPTYPE CONSOLE}
+{$ENDIF}
 
 uses
-  Windows, SysUtils;
+{$IFDEF WINDOWS}
+  Windows,
+{$ELSE}
+  BaseUnix, Unix,
+{$ENDIF}
+  SysUtils;
 
 const
-  AppVersion = '0.1.0';
+  AppVersion = '0.2.0';
 
   NameLen = 40;
   FilePathLen = 40;
@@ -28,31 +36,27 @@ const
   ConfigSysPathLen = 60;
 
   DefaultCodePage = 437;
-  DefaultSystemDir = 'c:\ele';
-
-  Kernel32Dll = 'kernel32.dll';
-  MdInvalidAttr = DWORD($FFFFFFFF);
-  MdAttrDirectory = $10;
-  MdAttrReparse = $400;
-  MdGenericRead = DWORD($80000000);
-  MdGenericWrite = DWORD($40000000);
-  MdShareRead = 1;
-  MdShareWrite = 2;
-  MdCreateAlways = 2;
-  MdOpenExisting = 3;
-  MdFileAttrNormal = $80;
-  MdMoveReplace = 1;
-  MdMoveWriteThrough = 8;
-  MdStdOutput = DWORD($FFFFFFF5);
-  MdStdError = DWORD($FFFFFFF4);
-  MdNoBestFit = $400;
-  MdBackupSemantics = $02000000;
-  MdShareDelete = 4;
-  MdSymlinkDirectory = 1;
-  MdSymlinkUnprivileged = 2;
-  MdErrorPrivilegeNotHeld = 1314;
-  MdErrorInvalidParameter = 87;
   LinkNameWidth = 6;
+
+{$IFDEF WINDOWS}
+  PathSepChar = '\';
+  CaseInsensitivePaths = True;
+  DefaultSystemDir = 'c:\ele';
+  EnvVarCount = 3;
+  EnvVars: array[0..EnvVarCount - 1] of String = ('ELEBBS', 'RA', 'ELE');
+  EnvPrefix = '%';
+  EnvSuffix = '%';
+  ExampleLinkDir = 'C:\ELE\MEDIA';
+{$ELSE}
+  PathSepChar = '/';
+  CaseInsensitivePaths = False;
+  DefaultSystemDir = '';
+  EnvVarCount = 5;
+  EnvVars: array[0..EnvVarCount - 1] of String = ('ELEBBS', 'RA', 'ELE', 'elebbs', 'ele');
+  EnvPrefix = '$';
+  EnvSuffix = '';
+  ExampleLinkDir = '/ele/media';
+{$ENDIF}
 
 type
   TFlagType = array[1..4] of Byte;
@@ -136,43 +140,8 @@ type
     Keys, Descs: TUStrArray;
   end;
 
-function MdGetFileAttributesW(p: PWideChar): DWORD; stdcall; external Kernel32Dll name 'GetFileAttributesW';
-function MdCreateFileW(p: PWideChar; access, share: DWORD; sec: Pointer; disposition, flags: DWORD; template: THandle): THandle; stdcall; external Kernel32Dll name 'CreateFileW';
-function MdReadFile(h: THandle; buf: Pointer; n: DWORD; done: PDWORD; ov: Pointer): BOOL; stdcall; external Kernel32Dll name 'ReadFile';
-function MdWriteFile(h: THandle; buf: Pointer; n: DWORD; done: PDWORD; ov: Pointer): BOOL; stdcall; external Kernel32Dll name 'WriteFile';
-function MdGetFileSize(h: THandle; high: PDWORD): DWORD; stdcall; external Kernel32Dll name 'GetFileSize';
-function MdFlushFileBuffers(h: THandle): BOOL; stdcall; external Kernel32Dll name 'FlushFileBuffers';
-function MdCloseHandle(h: THandle): BOOL; stdcall; external Kernel32Dll name 'CloseHandle';
-function MdDeleteFileW(p: PWideChar): BOOL; stdcall; external Kernel32Dll name 'DeleteFileW';
-function MdMoveFileExW(src, dst: PWideChar; flags: DWORD): BOOL; stdcall; external Kernel32Dll name 'MoveFileExW';
-function MdCopyFileW(src, dst: PWideChar; failIfExists: BOOL): BOOL; stdcall; external Kernel32Dll name 'CopyFileW';
-function MdFindFirstFileW(p: PWideChar; data: Pointer): THandle; stdcall; external Kernel32Dll name 'FindFirstFileW';
-function MdFindNextFileW(h: THandle; data: Pointer): BOOL; stdcall; external Kernel32Dll name 'FindNextFileW';
-function MdFindClose(h: THandle): BOOL; stdcall; external Kernel32Dll name 'FindClose';
-function MdGetFullPathNameW(p: PWideChar; n: DWORD; buf: PWideChar; filePart: Pointer): DWORD; stdcall; external Kernel32Dll name 'GetFullPathNameW';
-function MdGetLongPathNameW(p: PWideChar; buf: PWideChar; n: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetLongPathNameW';
-function MdGetShortPathNameW(p: PWideChar; buf: PWideChar; n: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetShortPathNameW';
-function MdGetCurrentDirectoryW(n: DWORD; buf: PWideChar): DWORD; stdcall; external Kernel32Dll name 'GetCurrentDirectoryW';
-function MdGetEnvironmentVariableW(name, buf: PWideChar; n: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetEnvironmentVariableW';
-function MdGetCommandLineW: PWideChar; stdcall; external Kernel32Dll name 'GetCommandLineW';
-function MdLocalFree(h: Pointer): Pointer; stdcall; external Kernel32Dll name 'LocalFree';
-function MdGetStdHandle(n: DWORD): THandle; stdcall; external Kernel32Dll name 'GetStdHandle';
-function MdGetConsoleMode(h: THandle; mode: PDWORD): BOOL; stdcall; external Kernel32Dll name 'GetConsoleMode';
-function MdWriteConsoleW(h: THandle; buf: Pointer; n: DWORD; done: PDWORD; reserved: Pointer): BOOL; stdcall; external Kernel32Dll name 'WriteConsoleW';
-function MdGetLastError: DWORD; stdcall; external Kernel32Dll name 'GetLastError';
-function MdIsValidCodePage(cp: UINT): BOOL; stdcall; external Kernel32Dll name 'IsValidCodePage';
-function MdWideCharToMultiByte(cp: UINT; flags: DWORD; src: PWideChar; srcLen: Integer; dst: PAnsiChar; dstLen: Integer; defChar: PAnsiChar; usedDef: Pointer): Integer; stdcall; external Kernel32Dll name 'WideCharToMultiByte';
-function MdMultiByteToWideChar(cp: UINT; flags: DWORD; src: PAnsiChar; srcLen: Integer; dst: PWideChar; dstLen: Integer): Integer; stdcall; external Kernel32Dll name 'MultiByteToWideChar';
-function MdCharLowerBuffW(p: PWideChar; n: DWORD): DWORD; stdcall; external 'user32.dll' name 'CharLowerBuffW';
-function MdCharUpperBuffW(p: PWideChar; n: DWORD): DWORD; stdcall; external 'user32.dll' name 'CharUpperBuffW';
-function MdCreateSymbolicLinkW(link, target: PWideChar; flags: DWORD): ByteBool; stdcall; external Kernel32Dll name 'CreateSymbolicLinkW';
-function MdGetFinalPathNameByHandleW(h: THandle; buf: PWideChar; n, flags: DWORD): DWORD; stdcall; external Kernel32Dll name 'GetFinalPathNameByHandleW';
-function MdCreateDirectoryW(p: PWideChar; sec: Pointer): BOOL; stdcall; external Kernel32Dll name 'CreateDirectoryW';
-function MdRemoveDirectoryW(p: PWideChar): BOOL; stdcall; external Kernel32Dll name 'RemoveDirectoryW';
-function MdCommandLineToArgvW(cmd: PWideChar; numArgs: PLongInt): PPWideChar; stdcall; external 'shell32.dll' name 'CommandLineToArgvW';
-
 var
-  CodePage: UINT = DefaultCodePage;
+  CodePage: Cardinal = DefaultCodePage;
 
 constructor EMd.CreateW(const AMsg: UnicodeString);
 begin
@@ -180,59 +149,12 @@ begin
   WMsg := AMsg;
 end;
 
-{ ---- console output ---- }
-
-procedure WriteTo(std: DWORD; const s: UnicodeString);
-var
-  h: THandle;
-  mode, done: DWORD;
-  line: UnicodeString;
-  u: UTF8String;
-begin
-  h := MdGetStdHandle(std);
-  line := s + #13#10;
-  if MdGetConsoleMode(h, @mode) then
-    MdWriteConsoleW(h, PWideChar(line), Length(line), @done, nil)
-  else
-  begin
-    u := UTF8Encode(line);
-    if Length(u) > 0 then
-      MdWriteFile(h, @u[1], Length(u), @done, nil);
-  end;
-end;
-
-procedure Say(const s: UnicodeString);
-begin
-  WriteTo(MdStdOutput, s);
-end;
-
-procedure Complain(const s: UnicodeString);
-begin
-  WriteTo(MdStdError, s);
-end;
-
-{ ---- string helpers ---- }
+{ ---- string and path helpers ---- }
 
 procedure AddStr(var a: TUStrArray; const s: UnicodeString);
 begin
   SetLength(a, Length(a) + 1);
   a[High(a)] := s;
-end;
-
-function LowerW(const s: UnicodeString): UnicodeString;
-begin
-  Result := s;
-  UniqueString(Result);
-  if Length(Result) > 0 then
-    MdCharLowerBuffW(PWideChar(Result), Length(Result));
-end;
-
-function UpperW(const s: UnicodeString): UnicodeString;
-begin
-  Result := s;
-  UniqueString(Result);
-  if Length(Result) > 0 then
-    MdCharUpperBuffW(PWideChar(Result), Length(Result));
 end;
 
 function TrimW(const s: UnicodeString): UnicodeString;
@@ -260,7 +182,30 @@ end;
 
 function IsSep(c: WideChar): Boolean;
 begin
+{$IFDEF WINDOWS}
   Result := (c = '\') or (c = '/');
+{$ELSE}
+  Result := c = '/';
+{$ENDIF}
+end;
+
+function IsRootPath(const s: UnicodeString): Boolean;
+begin
+{$IFDEF WINDOWS}
+  Result := (Length(s) = 3) and (s[2] = ':') and IsSep(s[3]);
+{$ELSE}
+  Result := s = '/';
+{$ENDIF}
+end;
+
+function IsAbsolute(const p: UnicodeString): Boolean;
+begin
+{$IFDEF WINDOWS}
+  Result := ((Length(p) >= 3) and (p[2] = ':') and IsSep(p[3]))
+         or ((Length(p) >= 2) and IsSep(p[1]) and IsSep(p[2]));
+{$ELSE}
+  Result := (p <> '') and (p[1] = '/');
+{$ENDIF}
 end;
 
 function StripTrailingSeps(const s: UnicodeString): UnicodeString;
@@ -270,9 +215,12 @@ begin
     SetLength(Result, Length(Result) - 1);
 end;
 
-function IsDriveRoot(const s: UnicodeString): Boolean;
+{ Drops trailing separators except on a root like C:\ or /. }
+function TidyDir(const s: UnicodeString): UnicodeString;
 begin
-  Result := (Length(s) = 3) and (s[2] = ':') and IsSep(s[3]);
+  Result := s;
+  if not IsRootPath(Result) and (StripTrailingSeps(Result) <> '') then
+    Result := StripTrailingSeps(Result);
 end;
 
 function JoinPath(const dir, name: UnicodeString): UnicodeString;
@@ -280,7 +228,7 @@ begin
   if (dir <> '') and IsSep(dir[Length(dir)]) then
     Result := dir + name
   else
-    Result := dir + '\' + name;
+    Result := dir + PathSepChar + name;
 end;
 
 function LastSepPos(const s: UnicodeString): Integer;
@@ -299,49 +247,28 @@ begin
   Result := Copy(p, 1, LastSepPos(p));
 end;
 
-function ErrText(code: DWORD): UnicodeString;
+{ File names EleBBS creates: upper case on Windows, lower case on Linux. }
+function NativeName(const name: UnicodeString): UnicodeString; forward;
+
+{$IFDEF WINDOWS}
+{$I platform_win.inc}
+{$ELSE}
+{$I platform_unix.inc}
+{$ENDIF}
+
+function NativeName(const name: UnicodeString): UnicodeString;
 begin
-  Result := TrimW(UnicodeString(SysErrorMessage(code)));
+  if CaseInsensitivePaths then Result := UpperW(name) else Result := LowerW(name);
 end;
 
-{ ---- code page conversion ---- }
-
-function EncodeCP(const s: UnicodeString): TBytes;
-var
-  n: Integer;
-  flags: DWORD;
-  def: AnsiChar;
-  pdef: PAnsiChar;
+procedure Say(const s: UnicodeString);
 begin
-  SetLength(Result, 0);
-  if s = '' then Exit;
-  if (CodePage = 65001) or (CodePage >= 50000) then
-  begin
-    flags := 0;
-    pdef := nil;
-  end
-  else
-  begin
-    flags := MdNoBestFit;
-    def := '?';
-    pdef := @def;
-  end;
-  n := MdWideCharToMultiByte(CodePage, flags, PWideChar(s), Length(s), nil, 0, pdef, nil);
-  if n <= 0 then Exit;
-  SetLength(Result, n);
-  MdWideCharToMultiByte(CodePage, flags, PWideChar(s), Length(s), PAnsiChar(@Result[0]), n, pdef, nil);
+  WriteTo(False, s);
 end;
 
-function DecodeCP(p: PByte; len: Integer): UnicodeString;
-var
-  n: Integer;
+procedure Complain(const s: UnicodeString);
 begin
-  Result := '';
-  if len <= 0 then Exit;
-  n := MdMultiByteToWideChar(CodePage, 0, PAnsiChar(p), len, nil, 0);
-  if n <= 0 then Exit;
-  SetLength(Result, n);
-  MdMultiByteToWideChar(CodePage, 0, PAnsiChar(p), len, PWideChar(Result), n);
+  WriteTo(True, s);
 end;
 
 function Representable(const s: UnicodeString): Boolean;
@@ -393,159 +320,6 @@ begin
     FillChar((p + 1 + p^)^, maxLen - p^, 0);
 end;
 
-{ ---- file system ---- }
-
-function Attrs(const p: UnicodeString): DWORD;
-begin
-  Result := MdGetFileAttributesW(PWideChar(p));
-end;
-
-function IsDir(const p: UnicodeString): Boolean;
-var
-  a: DWORD;
-begin
-  a := Attrs(p);
-  Result := (a <> MdInvalidAttr) and ((a and MdAttrDirectory) <> 0);
-end;
-
-function IsFile(const p: UnicodeString): Boolean;
-var
-  a: DWORD;
-begin
-  a := Attrs(p);
-  Result := (a <> MdInvalidAttr) and ((a and MdAttrDirectory) = 0);
-end;
-
-{ Returns dir\name with the on-disk spelling of name, or '' if no such file. }
-function FindFileCI(const dir, name: UnicodeString): UnicodeString;
-var
-  h: THandle;
-  fd: TWin32FindDataW;
-begin
-  Result := '';
-  h := MdFindFirstFileW(PWideChar(JoinPath(dir, name)), @fd);
-  if h = THandle(-1) then Exit;
-  if (fd.dwFileAttributes and MdAttrDirectory) = 0 then
-    Result := JoinPath(dir, UnicodeString(PWideChar(@fd.cFileName[0])));
-  MdFindClose(h);
-end;
-
-function CallPathApi(kind: Integer; const p: UnicodeString): UnicodeString;
-var
-  buf: array[0..32767] of WideChar;
-  n: DWORD;
-begin
-  case kind of
-    0: n := MdGetFullPathNameW(PWideChar(p), Length(buf), @buf[0], nil);
-    1: n := MdGetLongPathNameW(PWideChar(p), @buf[0], Length(buf));
-  else
-    n := MdGetShortPathNameW(PWideChar(p), @buf[0], Length(buf));
-  end;
-  if (n > 0) and (n < Length(buf)) then
-    Result := UnicodeString(PWideChar(@buf[0]))
-  else
-    Result := '';
-end;
-
-function FullPath(const p: UnicodeString): UnicodeString;
-begin
-  Result := CallPathApi(0, p);
-  if Result = '' then Result := p;
-end;
-
-function CurrentDir: UnicodeString;
-var
-  buf: array[0..32767] of WideChar;
-begin
-  if MdGetCurrentDirectoryW(Length(buf), @buf[0]) > 0 then
-    Result := UnicodeString(PWideChar(@buf[0]))
-  else
-    Result := '.';
-end;
-
-{ Where a path really leads once symlinks are followed, as a plain C:\... or
-  \\server\share\... path; '' if it can't be opened. }
-function FinalPath(const p: UnicodeString): UnicodeString;
-var
-  h: THandle;
-  buf: array[0..32767] of WideChar;
-  n: DWORD;
-begin
-  Result := '';
-  h := MdCreateFileW(PWideChar(p), 0, MdShareRead or MdShareWrite or MdShareDelete, nil,
-    MdOpenExisting, MdBackupSemantics, 0);
-  if h = THandle(-1) then Exit;
-  n := MdGetFinalPathNameByHandleW(h, @buf[0], Length(buf), 0);
-  MdCloseHandle(h);
-  if (n = 0) or (n >= DWORD(Length(buf))) then Exit;
-  Result := UnicodeString(PWideChar(@buf[0]));
-  if Copy(Result, 1, 8) = '\\?\UNC\' then
-    Result := '\\' + Copy(Result, 9, MaxInt)
-  else if Copy(Result, 1, 4) = '\\?\' then
-    Result := Copy(Result, 5, MaxInt);
-end;
-
-function IsReparse(const p: UnicodeString): Boolean;
-var
-  a: DWORD;
-begin
-  a := Attrs(StripTrailingSeps(p));
-  Result := (a <> MdInvalidAttr) and ((a and MdAttrReparse) <> 0);
-end;
-
-function GetEnvW(const name: UnicodeString): UnicodeString;
-var
-  buf: array[0..32767] of WideChar;
-  n: DWORD;
-begin
-  n := MdGetEnvironmentVariableW(PWideChar(name), @buf[0], Length(buf));
-  if (n > 0) and (n < Length(buf)) then
-    Result := UnicodeString(PWideChar(@buf[0]))
-  else
-    Result := '';
-end;
-
-function ReadAllBytes(const p: UnicodeString): TBytes;
-var
-  h: THandle;
-  size, got: DWORD;
-begin
-  SetLength(Result, 0);
-  h := MdCreateFileW(PWideChar(p), MdGenericRead, MdShareRead or MdShareWrite, nil, MdOpenExisting, MdFileAttrNormal, 0);
-  if h = THandle(-1) then
-    raise EMd.CreateW('cannot read ' + p + ': ' + ErrText(MdGetLastError));
-  try
-    size := MdGetFileSize(h, nil);
-    SetLength(Result, size);
-    if size > 0 then
-      if not MdReadFile(h, @Result[0], size, @got, nil) or (got <> size) then
-        raise EMd.CreateW('cannot read ' + p + ': ' + ErrText(MdGetLastError));
-  finally
-    MdCloseHandle(h);
-  end;
-end;
-
-procedure WriteAllBytes(const p: UnicodeString; const data: TBytes);
-var
-  h: THandle;
-  done: DWORD;
-  ok: Boolean;
-begin
-  h := MdCreateFileW(PWideChar(p), MdGenericWrite, 0, nil, MdCreateAlways, MdFileAttrNormal, 0);
-  if h = THandle(-1) then
-    raise EMd.CreateW(p + ': ' + ErrText(MdGetLastError));
-  ok := True;
-  if Length(data) > 0 then
-    ok := MdWriteFile(h, @data[0], Length(data), @done, nil) and (done = DWORD(Length(data)));
-  ok := ok and MdFlushFileBuffers(h);
-  if not ok then
-  begin
-    MdCloseHandle(h);
-    raise EMd.CreateW(p + ': ' + ErrText(MdGetLastError));
-  end;
-  MdCloseHandle(h);
-end;
-
 { Write to a temp file next to the target, then rename it into place. }
 procedure AtomicWrite(const p: UnicodeString; const data: TBytes);
 var
@@ -555,26 +329,22 @@ begin
   try
     WriteAllBytes(tmp, data);
   except
-    MdDeleteFileW(PWideChar(tmp));
+    RemoveFileW(tmp);
     raise;
   end;
-  if not MdMoveFileExW(PWideChar(tmp), PWideChar(p), MdMoveReplace or MdMoveWriteThrough) then
+  if IsFile(p) then CopyMode(p, tmp);
+  if not RenameReplace(tmp, p) then
   begin
-    MdDeleteFileW(PWideChar(tmp));
-    raise EMd.CreateW(p + ': ' + ErrText(MdGetLastError));
+    RemoveFileW(tmp);
+    raise EMd.CreateW(p + ': ' + LastErrorText);
   end;
 end;
 
 { ---- paths as EleBBS stores them ---- }
 
-function IsAbsolute(const p: UnicodeString): Boolean;
-begin
-  Result := ((Length(p) >= 3) and (p[2] = ':') and IsSep(p[3]))
-         or ((Length(p) >= 2) and IsSep(p[1]) and IsSep(p[2]));
-end;
-
 { Normalize a stored or scanned path so equal directories compare equal:
-  case, / vs \, trailing separators and 8.3 vs long names are ignored. }
+  trailing separators are ignored, and on Windows also case, / vs \ and
+  8.3 vs long names. }
 function ComparablePath(const path: UnicodeString): UnicodeString;
 var
   s, long: UnicodeString;
@@ -582,20 +352,22 @@ var
 begin
   s := TrimW(path);
   if s = '' then Exit('');
+{$IFDEF WINDOWS}
   for i := 1 to Length(s) do
     if s[i] = '/' then s[i] := '\';
-  long := CallPathApi(1, s);
+{$ENDIF}
+  long := LongPath(s);
   if long <> '' then s := long;
   if IsAbsolute(s) then s := FullPath(s);
-  s := LowerW(s);
+  if CaseInsensitivePaths then s := LowerW(s);
   Result := StripTrailingSeps(s);
   if Result = '' then Result := s;
 end;
 
-{ EleBBS builds file names as FilePath + FileName, so keep a trailing \. }
+{ EleBBS builds file names as FilePath + FileName, so keep a trailing separator. }
 function FormatAreaPath(const dir: UnicodeString; upper: Boolean): UnicodeString;
 begin
-  Result := StripTrailingSeps(dir) + '\';
+  Result := StripTrailingSeps(dir) + PathSepChar;
   if upper then Result := UpperW(Result);
 end;
 
@@ -611,7 +383,7 @@ var
 begin
   Result := FormatAreaPath(dir, upper);
   if FitsFilePath(Result) then Exit;
-  short := CallPathApi(2, dir);
+  short := ShortPath(dir);
   if (short <> '') and (short <> dir) then
   begin
     Result := FormatAreaPath(short, upper);
@@ -621,10 +393,9 @@ begin
 end;
 
 { Order follows EleBBS 0.11b1: ReadConfigRA looks in the current dir first,
-  then GetSysEnv checks ELEBBS, RA and ELE. }
+  then GetSysEnv checks ELEBBS, RA and ELE. Returns '' if nothing is found
+  and there is no built-in default. }
 function ResolveSystemDir(const option: UnicodeString; out source: UnicodeString): UnicodeString;
-const
-  Vars: array[0..2] of String = ('ELEBBS', 'RA', 'ELE');
 var
   cwd, v: UnicodeString;
   i: Integer;
@@ -640,12 +411,12 @@ begin
     source := 'current directory (contains CONFIG.RA)';
     Exit(cwd);
   end;
-  for i := Low(Vars) to High(Vars) do
+  for i := 0 to EnvVarCount - 1 do
   begin
-    v := TrimW(GetEnvW(UnicodeString(Vars[i])));
+    v := TrimW(GetEnvW(UnicodeString(EnvVars[i])));
     if v <> '' then
     begin
-      source := '%' + UnicodeString(Vars[i]) + '%';
+      source := EnvPrefix + UnicodeString(EnvVars[i]) + EnvSuffix;
       Exit(v);
     end;
   end;
@@ -695,7 +466,7 @@ begin
   end;
 end;
 
-function IsVideo(const name: UnicodeString): Boolean;
+function HasWantedExt(const name: UnicodeString): Boolean;
 var
   i, j: Integer;
   ext: UnicodeString;
@@ -732,35 +503,21 @@ begin
 end;
 
 { Top-down walk: a directory is listed before its subdirectories. }
-procedure FindMediaDirs(const dir: UnicodeString; follow: Boolean; var found: TUStrArray);
+procedure FindMatchingDirs(const dir: UnicodeString; follow: Boolean; var found: TUStrArray);
 var
-  h: THandle;
-  fd: TWin32FindDataW;
-  name: UnicodeString;
-  subs: TUStrArray;
-  hasVideo: Boolean;
+  subs, files: TUStrArray;
   i: Integer;
 begin
-  SetLength(subs, 0);
-  hasVideo := False;
-  h := MdFindFirstFileW(PWideChar(JoinPath(dir, '*')), @fd);
-  if h = THandle(-1) then Exit;
-  repeat
-    name := UnicodeString(PWideChar(@fd.cFileName[0]));
-    if (fd.dwFileAttributes and MdAttrDirectory) <> 0 then
+  if not ListDir(dir, follow, subs, files) then Exit;
+  for i := 0 to High(files) do
+    if HasWantedExt(files[i]) then
     begin
-      if (name <> '.') and (name <> '..')
-         and (follow or ((fd.dwFileAttributes and MdAttrReparse) = 0)) then
-        AddStr(subs, name);
-    end
-    else if IsVideo(name) then
-      hasVideo := True;
-  until not MdFindNextFileW(h, @fd);
-  MdFindClose(h);
-  if hasVideo then AddStr(found, dir);
+      AddStr(found, dir);
+      Break;
+    end;
   SortCaseless(subs);
   for i := 0 to High(subs) do
-    FindMediaDirs(JoinPath(dir, subs[i]), follow, found);
+    FindMatchingDirs(JoinPath(dir, subs[i]), follow, found);
 end;
 
 function TidySegment(const s: UnicodeString): UnicodeString;
@@ -805,7 +562,7 @@ begin
     begin
       seg := TidySegment(seg);
       if seg <> '' then
-        if Result = '' then Result := seg else Result := Result + '\' + seg;
+        if Result = '' then Result := seg else Result := Result + PathSepChar + seg;
       seg := '';
     end
     else
@@ -819,10 +576,10 @@ var
 begin
   Result := FileNameOf(StripTrailingSeps(dir));
   if Result = '' then Result := dir;
-  if relative and (LowerW(dir) <> LowerW(root)) then
+  if relative and (dir <> root) then
   begin
     prefix := JoinPath(root, '');
-    if LowerW(Copy(dir, 1, Length(prefix))) = LowerW(prefix) then
+    if Copy(dir, 1, Length(prefix)) = prefix then
       Result := Copy(dir, Length(prefix) + 1, MaxInt);
   end;
 end;
@@ -880,11 +637,11 @@ begin
     if sp <> '' then AddStr(search, sp);
   end;
   af.FilesRa := Lookup('FILES.RA');
-  if af.FilesRa = '' then af.FilesRa := JoinPath(sysDir, 'FILES.RA');
+  if af.FilesRa = '' then af.FilesRa := JoinPath(sysDir, NativeName('FILES.RA'));
   af.FilesEle := Lookup('FILES.ELE');
-  if af.FilesEle = '' then af.FilesEle := JoinPath(DirOf(af.FilesRa), 'FILES.ELE');
+  if af.FilesEle = '' then af.FilesEle := JoinPath(DirOf(af.FilesRa), NativeName('FILES.ELE'));
   af.FilesRdx := FindFileCI(DirOf(af.FilesRa), 'FILES.RDX');
-  if af.FilesRdx = '' then af.FilesRdx := JoinPath(DirOf(af.FilesRa), 'FILES.RDX');
+  if af.FilesRdx = '' then af.FilesRdx := JoinPath(DirOf(af.FilesRa), NativeName('FILES.RDX'));
 end;
 
 procedure LoadAreaFiles(const sysDir: UnicodeString; var af: TAreaFiles);
@@ -948,7 +705,8 @@ begin
   Result := -1;
 end;
 
-{ Duplicates: FILES.RA FilePath, or FILES.ELE ftpPath when it is a local path. }
+{ Duplicates: FILES.RA FilePath (or where it links to), or FILES.ELE ftpPath
+  when it is a local path. }
 procedure CollectExisting(const af: TAreaFiles; var ex: TExisting);
 var
   i: Integer;
@@ -960,7 +718,7 @@ begin
     desc := FileNameOf(af.FilesRa) + ' record ' + IntToStr(i + 1) + ' (area '
       + IntToStr(af.Ra[i].AreaNum) + ', ''' + GetPStr(af.Ra[i].Name, NameLen) + ''')';
     AddExisting(ex, ComparablePath(path), desc);
-    if (TrimW(path) <> '') and IsReparse(path) then
+    if (TrimW(path) <> '') and IsLink(path) then
       AddExisting(ex, ComparablePath(FinalPath(path)), desc + ' via symlink ' + path);
   end;
   for i := 0 to High(af.Ele) do
@@ -1048,7 +806,7 @@ begin
     if (filePath = '') and (linkDir <> '') then
     begin
       linkPath := JoinPath(linkDir, LinkName(nextFree));
-      if Attrs(linkPath) <> MdInvalidAttr then
+      if PathExists(linkPath) then
       begin
         if ComparablePath(FinalPath(linkPath)) <> key then
         begin
@@ -1067,7 +825,7 @@ begin
       else
         Skip(dirs[i], 'path too long: ' + FormatAreaPath(dirs[i], upperPaths) + ' is '
           + IntToStr(Length(FormatAreaPath(dirs[i], upperPaths)))
-          + ' characters, EleBBS allows 40 and there is no short 8.3 name (use --link-dir)');
+          + ' characters, EleBBS allows 40 (use --link-dir)');
       Continue;
     end;
 
@@ -1122,7 +880,7 @@ begin
   for i := 0 to High(table) do table[i] := 0;
   for i := 0 to High(areaNums) do
     if areaNums[i] > 0 then
-      table[areaNums[i] - 1] := Word((i + 1) and $FFFF);
+      table[areaNums[i] - 1] := NtoLE(Word((i + 1) and $FFFF));
   SetLength(Result, maxArea * 2);
   if maxArea > 0 then Move(table[0], Result[0], maxArea * 2);
 end;
@@ -1142,8 +900,8 @@ begin
     if IsFile(files[i]) then
     begin
       target := files[i] + '.' + stamp + '.bak';
-      if not MdCopyFileW(PWideChar(files[i]), PWideChar(target), False) then
-        raise EMd.CreateW('backing up ' + files[i] + ' failed: ' + ErrText(MdGetLastError));
+      if not CopyFileTo(files[i], target) then
+        raise EMd.CreateW('backing up ' + files[i] + ' failed: ' + LastErrorText);
       AddStr(Result, target);
     end;
 end;
@@ -1202,7 +960,7 @@ var
   i: Integer;
 begin
   for i := 0 to High(created) do
-    MdRemoveDirectoryW(PWideChar(created[i]));
+    RemoveLink(created[i]);
 end;
 
 { Directory symlinks for areas whose real path doesn't fit FilePath. Already
@@ -1210,33 +968,19 @@ end;
 function CreateLinks(const linkDir: UnicodeString; const plan: TPlan): TUStrArray;
 var
   i: Integer;
-  err: DWORD;
-  msg: UnicodeString;
+  err: UnicodeString;
 begin
   SetLength(Result, 0);
   for i := 0 to High(plan.New) do
   begin
     if (plan.New[i].LinkPath = '') or plan.New[i].LinkExists then Continue;
-    if not IsDir(linkDir) and not MdCreateDirectoryW(PWideChar(linkDir), nil) then
-      raise EMd.CreateW('cannot create ' + linkDir + ': ' + ErrText(MdGetLastError));
-    if not MdCreateSymbolicLinkW(PWideChar(plan.New[i].LinkPath), PWideChar(plan.New[i].SourceDir),
-       MdSymlinkDirectory or MdSymlinkUnprivileged) then
+    if not IsDir(linkDir) and not MakeDir(linkDir) then
+      raise EMd.CreateW('cannot create ' + linkDir + ': ' + LastErrorText);
+    if not MakeDirLink(plan.New[i].LinkPath, plan.New[i].SourceDir, err) then
     begin
-      err := MdGetLastError;
-      if err = MdErrorInvalidParameter then
-        if MdCreateSymbolicLinkW(PWideChar(plan.New[i].LinkPath), PWideChar(plan.New[i].SourceDir),
-           MdSymlinkDirectory) then
-        begin
-          AddStr(Result, plan.New[i].LinkPath);
-          Continue;
-        end
-        else
-          err := MdGetLastError;
       RemoveLinks(Result);
-      msg := 'cannot create symlink ' + plan.New[i].LinkPath + ' -> ' + plan.New[i].SourceDir + ': ' + ErrText(err);
-      if err = MdErrorPrivilegeNotHeld then
-        msg := msg + '. Run filedirs as administrator or turn on Windows Developer Mode.';
-      raise EMd.CreateW(msg);
+      raise EMd.CreateW('cannot create symlink ' + plan.New[i].LinkPath + ' -> '
+        + plan.New[i].SourceDir + ': ' + err);
     end;
     AddStr(Result, plan.New[i].LinkPath);
   end;
@@ -1246,12 +990,18 @@ end;
 
 const
   Usage = 'usage: filedirs [-h] [--elebbs-dir DIR] [--dry-run] [--name-style {leaf,relative}]'
-    + #13#10 + '                [--no-backup] [--template-area N] [--security LEVEL]'
-    + #13#10 + '                [--uppercase-paths] [--encoding CP] [--follow-symlinks]'
-    + #13#10 + '                [--link-dir DIR] [--ext LIST] [--version] start_dir';
+    + LineEnding + '                [--no-backup] [--template-area N] [--security LEVEL]'
+    + LineEnding + '                [--uppercase-paths] [--encoding CP] [--follow-symlinks]'
+    + LineEnding + '                [--link-dir DIR] [--ext LIST] [--version] start_dir';
 
 procedure PrintHelp;
+var
+  envs: UnicodeString;
+  i: Integer;
 begin
+  envs := '';
+  for i := 0 to EnvVarCount - 1 do
+    envs := envs + EnvPrefix + UnicodeString(EnvVars[i]) + EnvSuffix + ', ';
   Say(Usage);
   Say('');
   Say('Scan a directory tree for folders that directly contain files with the given');
@@ -1265,7 +1015,10 @@ begin
   Say('  -h, --help            show this help message and exit');
   Say('  --elebbs-dir DIR      EleBBS system dir holding CONFIG.RA, CONFIG.ELE, FILES.RA');
   Say('                        and FILES.ELE (default: current dir if it has CONFIG.RA,');
-  Say('                        then %ELEBBS%, %RA%, %ELE%, then c:\ele)');
+  if DefaultSystemDir <> '' then
+    Say('                        then ' + envs + 'then ' + DefaultSystemDir + ')')
+  else
+    Say('                        then ' + Copy(envs, 1, Length(envs) - 2) + ')');
   Say('  --dry-run             print the planned areas without writing');
   Say('  --name-style {leaf,relative}');
   Say('                        area name: the directory''s path after START_DIR');
@@ -1278,12 +1031,20 @@ begin
   Say('                        default: 0)');
   Say('  --uppercase-paths     store paths in upper case, DOS style');
   Say('  --encoding CP         code page for names and paths in the records (default:');
+{$IFDEF WINDOWS}
   Say('                        cp437)');
+{$ELSE}
+  Say('                        cp437, the only one built in on Linux)');
+{$ENDIF}
   Say('  --follow-symlinks     descend into symlinked directories');
   Say('  --link-dir DIR        for folders whose path won''t fit in 40 characters, create');
-  Say('                        a directory symlink DIR\A<area number> pointing to the');
-  Say('                        folder and store that instead (needs admin rights or');
-  Say('                        Developer Mode), e.g. --link-dir C:\ELE\MEDIA');
+  Say('                        a directory symlink ' + JoinPath('DIR', 'A<area number>') + ' pointing to');
+  Say('                        the folder and store that instead, e.g.');
+  Say('                        --link-dir ' + ExampleLinkDir
+{$IFDEF WINDOWS}
+    + ' (needs admin rights or Developer Mode)'
+{$ENDIF}
+    );
   Say('  --ext LIST            comma-separated file extensions to look for, any case,');
   Say('                        e.g. --ext mkv,mp4,avi,m4v (default: ' + DefaultExtensions + ')');
   Say('  --version             show program''s version number and exit');
@@ -1304,22 +1065,22 @@ begin
     UsageError('argument ' + opt + ': must be between ' + IntToStr(lo) + ' and ' + IntToStr(hi));
 end;
 
-function ParseCodePage(const value: UnicodeString): UINT;
+function ParseCodePage(const value: UnicodeString): Cardinal;
 var
   s: UnicodeString;
   n: Integer;
 begin
   s := LowerW(TrimW(value));
   if Copy(s, 1, 2) = 'cp' then s := Copy(s, 3, MaxInt);
-  if not TryStrToInt(String(s), n) or (n <= 0) or not MdIsValidCodePage(n) then
-    UsageError('argument --encoding: unknown code page: ''' + value + '''');
+  if not TryStrToInt(String(s), n) or not ValidCodePage(n) then
+    UsageError('argument --encoding: unknown or unsupported code page: ''' + value + '''');
   Result := n;
 end;
 
 function RunMain: Integer;
 var
-  argv: PPWideChar;
-  argc, i, eq: LongInt;
+  args: TUStrArray;
+  i, eq: Integer;
   a, opt, value: UnicodeString;
   hasValue, optionsDone: Boolean;
   startArg, elebbsDir, sysDir, source, start: UnicodeString;
@@ -1336,8 +1097,8 @@ var
   begin
     if hasValue then Exit(value);
     Inc(i);
-    if i >= argc then UsageError('argument ' + opt + ': expected one argument');
-    Result := UnicodeString(argv[i]);
+    if i > High(args) then UsageError('argument ' + opt + ': expected one argument');
+    Result := args[i];
   end;
 
 begin
@@ -1355,11 +1116,11 @@ begin
 
   ParseExtensions(DefaultExtensions, Extensions);
 
-  argv := MdCommandLineToArgvW(MdGetCommandLineW, @argc);
-  i := 1;
-  while i < argc do
+  args := GetArgs;
+  i := 0;
+  while i <= High(args) do
   begin
-    a := UnicodeString(argv[i]);
+    a := args[i];
     if not optionsDone and (a = '--') then
       optionsDone := True
     else if not optionsDone and (Length(a) > 1) and (a[1] = '-') then
@@ -1413,13 +1174,11 @@ begin
       UsageError('unrecognized arguments: ' + a);
     Inc(i);
   end;
-  MdLocalFree(argv);
 
   if startArg = '' then
     UsageError('the following arguments are required: start_dir');
 
-  start := FullPath(startArg);
-  if not IsDriveRoot(start) then start := StripTrailingSeps(start);
+  start := TidyDir(FullPath(startArg));
   if not IsDir(start) then
   begin
     Complain('error: start dir not found: ' + startArg);
@@ -1428,8 +1187,7 @@ begin
 
   if linkDir <> '' then
   begin
-    linkDir := FullPath(linkDir);
-    if not IsDriveRoot(linkDir) then linkDir := StripTrailingSeps(linkDir);
+    linkDir := TidyDir(FullPath(linkDir));
     if Length(FormatAreaPath(JoinPath(linkDir, LinkName(1)), upperPaths)) > FilePathLen then
       UsageError('argument --link-dir: ' + linkDir + ' is too long; links like '
         + FormatAreaPath(JoinPath(linkDir, LinkName(1)), upperPaths) + ' must fit in 40 characters');
@@ -1439,8 +1197,12 @@ begin
   end;
 
   sysDir := ResolveSystemDir(elebbsDir, source);
-  if not IsDriveRoot(sysDir) and (StripTrailingSeps(sysDir) <> '') then
-    sysDir := StripTrailingSeps(sysDir);
+  if sysDir = '' then
+  begin
+    Complain('error: no EleBBS system dir found; pass --elebbs-dir DIR or set ' + EnvPrefix + 'ELEBBS' + EnvSuffix);
+    Exit(1);
+  end;
+  sysDir := TidyDir(sysDir);
   try
     LoadAreaFiles(sysDir, af);
     useTemplate := templateArea > 0;
@@ -1461,7 +1223,7 @@ begin
     Complain('warning: ' + af.Warnings[i]);
 
   SetLength(dirs, 0);
-  FindMediaDirs(start, follow, dirs);
+  FindMatchingDirs(start, follow, dirs);
   SetLength(names, Length(dirs));
   for i := 0 to High(dirs) do
     names[i] := AreaName(dirs[i], start, relative);

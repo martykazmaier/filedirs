@@ -1,2 +1,4 @@
 build/
 *.bak
+filedirs.exe
+/filedirs

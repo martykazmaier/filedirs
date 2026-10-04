@@ -1,0 +1,94 @@
+name: build
+
+# Builds filedirs for Win32, Linux i386, Linux x86_64 and Linux arm64.
+# Pushing a tag like v0.2.0 also publishes the builds as a GitHub Release.
+
+on:
+  push:
+    branches: [main]
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  linux:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - platform: linux/386
+            asset: filedirs-linux-i386
+          - platform: linux/amd64
+            asset: filedirs-linux-x86_64
+          - platform: linux/arm64
+            asset: filedirs-linux-arm64
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-qemu-action@v3
+        if: matrix.platform == 'linux/arm64'
+      - name: Build in Debian with Free Pascal 3.2.2
+        run: |
+          docker run --rm --platform ${{ matrix.platform }} -v "$PWD:/src" -w /src debian:bookworm sh -ec '
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y -qq fp-compiler fp-units-rtl file >/dev/null
+            sh build.sh
+            file filedirs
+            ./filedirs --version
+            chown -R '"$(id -u):$(id -g)"' .'
+      - name: Package
+        run: |
+          mkdir -p dist
+          tar -czf dist/${{ matrix.asset }}.tar.gz filedirs
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.asset }}
+          path: dist/${{ matrix.asset }}.tar.gz
+
+  win32:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install Free Pascal 3.2.2 (i386-win32)
+        shell: pwsh
+        run: |
+          $urls = @(
+            'https://downloads.freepascal.org/fpc/dist/3.2.2/i386-win32/fpc-3.2.2.i386-win32.exe',
+            'https://downloads.sourceforge.net/project/freepascal/Win32/3.2.2/fpc-3.2.2.i386-win32.exe'
+          )
+          foreach ($u in $urls) {
+            curl.exe -L --fail --retry 3 -o fpc-setup.exe $u
+            if ($LASTEXITCODE -eq 0 -and (Get-Item fpc-setup.exe).Length -gt 10MB) { break }
+          }
+          Start-Process .\fpc-setup.exe -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-','/DIR=C:\fpc' -Wait
+          "C:\fpc\bin\i386-win32" | Out-File -Append -Encoding utf8 $env:GITHUB_PATH
+      - name: Build
+        shell: cmd
+        run: |
+          call build.bat
+          filedirs.exe --version
+      - name: Package
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force dist | Out-Null
+          Compress-Archive -Path filedirs.exe -DestinationPath dist\filedirs-win32.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: filedirs-win32
+          path: dist/filedirs-win32.zip
+
+  release:
+    if: startsWith(github.ref, 'refs/tags/v')
+    needs: [linux, win32]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: dist/*
+          generate_release_notes: true
