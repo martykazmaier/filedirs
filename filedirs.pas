@@ -25,7 +25,7 @@ uses
   SysUtils;
 
 const
-  AppVersion = '0.2.0';
+  AppVersion = '0.2.1';
 
   NameLen = 40;
   FilePathLen = 40;
