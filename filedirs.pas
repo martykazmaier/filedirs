@@ -5,7 +5,11 @@ program filedirs;
   chosen extensions (video files by default).
   Record layouts follow FILESrecord and EleFilesRecord in struct.250 of the
   EleBBS 0.11b1 source (github.com/mbek/elebbs, commit 0d026e2).
-  Builds for Win32 and Linux; platform code lives in platform_*.inc. }
+  Builds for Win32 and Linux; platform code lives in platform_*.inc.
+
+  Copyright (C) 2026 Martin Kazmaier.
+  This program may be distributed under the terms of the Q Public License
+  version 1.0; see the LICENSE file. }
 
 {$mode objfpc}{$H+}
 {$IFDEF WINDOWS}

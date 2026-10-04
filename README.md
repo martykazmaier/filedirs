@@ -108,3 +108,9 @@ GitHub Actions builds all four versions on every push to `main`. Pushing a versi
 git tag -a v0.2.1 -m "filedirs 0.2.1"
 git push origin v0.2.1
 ```
+
+## License
+
+Copyright (C) 2026 Martin Kazmaier.
+
+filedirs may be distributed under the terms of the Q Public License version 1.0. See [LICENSE](LICENSE) for the full text. The complete source code is available free of charge from this repository at [github.com/martykazmaier/filedirs](https://github.com/martykazmaier/filedirs).

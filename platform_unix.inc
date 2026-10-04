@@ -1,5 +1,9 @@
 { Linux/Unix implementation of the platform layer used by filedirs.pas.
-  File names are treated as UTF-8. Only code page 437 is built in. }
+  File names are treated as UTF-8. Only code page 437 is built in.
+
+  Copyright (C) 2026 Martin Kazmaier.
+  This program may be distributed under the terms of the Q Public License
+  version 1.0; see the LICENSE file. }
 
 const
   Cp437High: array[$80..$FF] of Word = (

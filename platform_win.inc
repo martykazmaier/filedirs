@@ -1,4 +1,8 @@
-{ Windows implementation of the platform layer used by filedirs.pas. }
+{ Windows implementation of the platform layer used by filedirs.pas.
+
+  Copyright (C) 2026 Martin Kazmaier.
+  This program may be distributed under the terms of the Q Public License
+  version 1.0; see the LICENSE file. }
 
 const
   Kernel32Dll = 'kernel32.dll';

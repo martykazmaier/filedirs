@@ -41,7 +41,7 @@ jobs:
       - name: Package
         run: |
           mkdir -p dist
-          tar -czf dist/${{ matrix.asset }}.tar.gz filedirs
+          tar -czf dist/${{ matrix.asset }}.tar.gz filedirs LICENSE README.md
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.asset }}
@@ -73,7 +73,7 @@ jobs:
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force dist | Out-Null
-          Compress-Archive -Path filedirs.exe -DestinationPath dist\filedirs-win32.zip
+          Compress-Archive -Path filedirs.exe, LICENSE, README.md -DestinationPath dist\filedirs-win32.zip
       - uses: actions/upload-artifact@v4
         with:
           name: filedirs-win32
